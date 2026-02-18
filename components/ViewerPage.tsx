@@ -1,5 +1,5 @@
 // ViewerPage.tsx
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { StreamMode, Resolution } from '../types';
 
 interface ViewerPageProps {
@@ -50,10 +50,10 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [availableResolutions, setAvailableResolutions] = useState<Resolution[]>(VIEWER_RESOLUTIONS);
   const [showResolutions, setShowResolutions] = useState(false);
   const [stats, setStats] = useState<{ bitrate: number; fps: number } | null>(null);
-  const [isLive, setIsLive] = useState(true);
+  const [isLiveStream, setIsLiveStream] = useState(true);
   const [liveLatency, setLiveLatency] = useState(0);
   const [showLiveIndicator, setShowLiveIndicator] = useState(false);
-  const [isLiveStream, setIsLiveStream] = useState(true); // True for WebRTC live, false for file upload
+  const [hasVideo, setHasVideo] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -66,56 +66,169 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const statsTimer = useRef<number | null>(null);
   const lastLiveTimeRef = useRef<number>(Date.now());
   const liveCheckTimer = useRef<number | null>(null);
+  const reconnectTimer = useRef<number | null>(null);
 
   const viewerId = useMemo(
     () => `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
     []
   );
 
-  // Safe play
-  const safePlay = async () => {
+  // Safe play with better error handling
+  const safePlay = useCallback(async () => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v) return false;
+    
     try {
-      if (playPromiseRef.current) await playPromiseRef.current.catch(() => {});
-      playPromiseRef.current = v.play();
-      await playPromiseRef.current;
-      setPlaying(true);
+      // Cancel any existing play promise
+      if (playPromiseRef.current) {
+        await playPromiseRef.current.catch(() => {});
+        playPromiseRef.current = null;
+      }
+      
+      // Only try to play if paused
+      if (v.paused) {
+        playPromiseRef.current = v.play();
+        await playPromiseRef.current;
+        setPlaying(true);
+        return true;
+      }
+      return true;
     } catch (e: any) {
-      if (e.name !== 'AbortError') console.warn(e);
+      // Ignore abort errors (from rapid play/pause)
+      if (e.name !== 'AbortError') {
+        console.warn('Play error:', e);
+      }
+      return false;
     } finally {
       playPromiseRef.current = null;
     }
-  };
+  }, []);
 
   // Safe pause
-  const safePause = () => {
+  const safePause = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
+    
     try {
       v.pause();
       setPlaying(false);
     } catch (e) {
       console.error('Pause error:', e);
     }
-  };
+  }, []);
+
+  // Toggle play/pause
+  const togglePlay = useCallback(async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    
+    if (v.paused) {
+      await safePlay();
+    } else {
+      safePause();
+    }
+  }, [safePlay, safePause]);
+
+  // Toggle mute
+  const toggleMute = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    
+    v.muted = !v.muted;
+    setMuted(v.muted);
+  }, []);
+
+  // Change volume
+  const changeVolume = useCallback((val: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    
+    v.volume = val;
+    v.muted = val === 0;
+    setVolume(val);
+    setMuted(val === 0);
+  }, []);
+
+  // Change playback rate
+  const changePlaybackRate = useCallback((rate: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    
+    v.playbackRate = rate;
+    setPlaybackRate(rate);
+    setShowSettings(false);
+  }, []);
+
+  // Change resolution
+  const changeResolution = useCallback((resolution: Resolution) => {
+    setSelectedResolution(resolution);
+    setShowResolutions(false);
+    
+    // Request stream with new resolution
+    if (pcRef.current && streamId && bcRef.current) {
+      bcRef.current.postMessage({
+        type: 'VIEWER_JOIN',
+        payload: { streamId, viewerId, resolution }
+      });
+    }
+  }, [streamId, viewerId]);
+
+  // Seek
+  const seek = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = videoRef.current;
+    if (!v || !duration || isLiveStream) return;
+    
+    v.currentTime = parseFloat(e.target.value);
+  }, [duration, isLiveStream]);
 
   // Seek to live
-  const seekToLive = () => {
+  const seekToLive = useCallback(() => {
     const v = videoRef.current;
     if (!v || !isLiveStream) return;
     
-    // For live WebRTC streams, we can't seek forward, but we can pause/resume
-    // The video will continue playing from the current live point
+    // For live streams, we can't seek forward, but we can ensure we're playing
     if (v.paused) {
       safePlay();
     }
     
     setShowLiveIndicator(false);
-  };
+  }, [isLiveStream, safePlay]);
+
+  // Toggle fullscreen
+  const toggleFullscreen = useCallback(async () => {
+    if (!containerRef.current) return;
+    
+    try {
+      if (!document.fullscreenElement) {
+        await containerRef.current.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (e) {
+      console.error('Fullscreen error:', e);
+    }
+  }, []);
+
+  // Toggle picture-in-picture
+  const togglePip = useCallback(async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setPip(false);
+      } else {
+        await v.requestPictureInPicture();
+        setPip(true);
+      }
+    } catch (e) {
+      console.error('PiP error:', e);
+    }
+  }, []);
 
   // Reset controls timer
-  const resetControls = () => {
+  const resetControls = useCallback(() => {
     setShowControls(true);
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
     controlsTimer.current = window.setTimeout(() => {
@@ -124,60 +237,142 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       setShowSettings(false);
       setShowResolutions(false);
     }, 3500);
-  };
+  }, []);
 
-  // Update stats
-  const updateStats = () => {
-    if (!pcRef.current || !videoRef.current) return;
-    
-    const videoTrack = videoRef.current.srcObject instanceof MediaStream
-      ? videoRef.current.srcObject.getVideoTracks()[0]
-      : null;
-    
-    if (videoTrack && 'getStats' in pcRef.current) {
-      (pcRef.current as any).getStats(null).then((reports: any) => {
-        let bitrate = 0;
-        let fps = 0;
-        
-        reports.forEach((report: any) => {
-          if (report.type === 'inbound-rtp' && report.kind === 'video') {
-            bitrate = Math.round(report.bitrateMean || 0);
-            fps = Math.round(report.framesPerSecond || 0);
-          }
-        });
-        
-        setStats({ bitrate, fps });
-      }).catch(() => {});
-    }
-  };
-
-  // Check if viewer is behind live
-  const checkLiveLatency = () => {
+  // Check live latency
+  const checkLiveLatency = useCallback(() => {
     const v = videoRef.current;
-    if (!v || !isLiveStream) return;
+    if (!v || !isLiveStream || !v.buffered.length) return;
     
-    if (v.buffered.length > 0) {
+    try {
       const bufferedEnd = v.buffered.end(v.buffered.length - 1);
-      const currentTime = v.currentTime;
-      const latency = bufferedEnd - currentTime;
+      const current = v.currentTime;
+      const latency = bufferedEnd - current;
       
       setLiveLatency(latency);
       
-      // If latency > 2 seconds, show "Live" indicator
-      if (latency > 2 && !v.paused) {
+      // Show live indicator if latency > 2 seconds and video is playing
+      if (latency > 2 && !v.paused && isLiveStream) {
         setShowLiveIndicator(true);
       } else {
         setShowLiveIndicator(false);
       }
+    } catch (e) {
+      // Ignore buffered range errors
     }
-  };
+  }, [isLiveStream]);
 
-  // Main effect
+  // Update stats
+  const updateStats = useCallback(() => {
+    if (!pcRef.current || !videoRef.current) return;
+    
+    try {
+      const videoTrack = videoRef.current.srcObject instanceof MediaStream
+        ? videoRef.current.srcObject.getVideoTracks()[0]
+        : null;
+      
+      if (videoTrack && 'getStats' in pcRef.current) {
+        (pcRef.current as any).getStats().then((reports: any) => {
+          let bitrate = 0;
+          let fps = 0;
+          
+          reports.forEach((report: any) => {
+            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              bitrate = Math.round(report.bitrateMean || 0);
+              fps = Math.round(report.framesPerSecond || 0);
+            }
+          });
+          
+          setStats({ bitrate, fps });
+        }).catch(() => {});
+      }
+    } catch (e) {
+      // Ignore stats errors
+    }
+  }, []);
+
+  // Main effect for WebRTC and BroadcastChannel
   useEffect(() => {
+    console.log('Viewer mounting with ID:', viewerId, 'Stream ID:', streamId);
+    
+    // Create BroadcastChannel
     const bc = new BroadcastChannel('secure_stream_channel');
     bcRef.current = bc;
 
-    // WebRTC offer handler
+    // Create RTCPeerConnection
+    const createPeerConnection = () => {
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+      });
+
+      // Handle ICE candidates
+      pc.onicecandidate = (e) => {
+        if (e.candidate && bcRef.current) {
+          bcRef.current.postMessage({ 
+            type: 'SIGNAL_ICE', 
+            payload: { viewerId, candidate: e.candidate.toJSON() } 
+          });
+        }
+      };
+
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        console.log('Connection state:', pc.connectionState);
+        if (pc.connectionState === 'connected') {
+          setStatus('live');
+          if (reconnectTimer.current) {
+            clearTimeout(reconnectTimer.current);
+            reconnectTimer.current = null;
+          }
+        }
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          setStatus('connecting');
+          // Try to reconnect
+          if (!reconnectTimer.current) {
+            reconnectTimer.current = window.setTimeout(() => {
+              if (bcRef.current) {
+                bcRef.current.postMessage({ 
+                  type: 'VIEWER_JOIN', 
+                  payload: { streamId, viewerId } 
+                });
+              }
+              reconnectTimer.current = null;
+            }, 3000);
+          }
+        }
+      };
+
+      // Handle tracks
+      pc.ontrack = (event) => {
+        console.log('Received track:', event.track.kind);
+        const v = videoRef.current;
+        if (!v) return;
+        
+        // Set stream to video element
+        v.srcObject = event.streams[0];
+        setHasVideo(true);
+        setStatus('live');
+        
+        // Determine if this is a live stream or file upload
+        // For WebRTC, it's always live
+        setIsLiveStream(true);
+        
+        // Try to play
+        safePlay().catch(console.warn);
+        
+        // Start stats collection
+        if (statsTimer.current) clearInterval(statsTimer.current);
+        statsTimer.current = window.setInterval(updateStats, 2000);
+      };
+
+      pcRef.current = pc;
+      return pc;
+    };
+
+    // Handle WebRTC offer
     const handleOffer = async (
       offer: RTCSessionDescriptionInit,
       offerStreamId: string,
@@ -186,68 +381,59 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       streamResolution?: Resolution
     ) => {
       if (offerStreamId !== streamId) return;
-      pcRef.current?.close();
-
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      });
-      pcRef.current = pc;
-
-      pc.onicecandidate = e => {
-        if (e.candidate)
-          bc.postMessage({ type: 'SIGNAL_ICE', payload: { viewerId, candidate: e.candidate.toJSON() } });
-      };
-
-      pc.ontrack = async event => {
-        const v = videoRef.current;
-        if (!v) return;
-        
-        // This is a live WebRTC stream
-        setIsLiveStream(true);
-        setIsLive(true);
-        
-        v.srcObject = event.streams[0];
-        setStatus('live');
-        await safePlay();
-        
-        if (statsTimer.current) clearInterval(statsTimer.current);
-        statsTimer.current = window.setInterval(updateStats, 2000);
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') setStatus('live');
-        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-          setStatus('connecting');
-          bc.postMessage({ type: 'VIEWER_JOIN', payload: { streamId, viewerId } });
-        }
-      };
-
-      await pc.setRemoteDescription(new RTCSessionDescription(offer)).catch(console.error);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      bc.postMessage({ type: 'SIGNAL_ANSWER', payload: { viewerId, answer } });
-
-      const info = { title, mode };
-      streamInfoRef.current = info;
-      setStreamInfo(info);
       
-      if (streamResolution) {
-        setAvailableResolutions(prev => {
-          const exists = prev.some(r => r.width === streamResolution.width);
-          if (!exists) {
-            return [...prev, streamResolution];
-          }
-          return prev;
-        });
+      console.log('Received offer for stream:', offerStreamId);
+      
+      // Close existing connection
+      if (pcRef.current) {
+        pcRef.current.close();
+      }
+
+      // Create new connection
+      const pc = createPeerConnection();
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        console.log('Set remote description');
+        
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        console.log('Created and set local description');
+        
+        // Send answer back to admin
+        if (bcRef.current) {
+          bcRef.current.postMessage({ 
+            type: 'SIGNAL_ANSWER', 
+            payload: { viewerId, answer } 
+          });
+        }
+
+        // Update stream info
+        const info = { title, mode };
+        streamInfoRef.current = info;
+        setStreamInfo(info);
+        
+        // Update available resolutions
+        if (streamResolution) {
+          setAvailableResolutions(prev => {
+            const exists = prev.some(r => r.width === streamResolution.width);
+            if (!exists) {
+              return [...prev, streamResolution];
+            }
+            return prev;
+          });
+        }
+      } catch (e) {
+        console.error('Error handling offer:', e);
       }
     };
 
-    // Message handler
+    // Handle messages from admin
     bc.onmessage = async (event) => {
       const { type, payload } = event.data;
+      console.log('Received message:', type, payload);
+
+      // Filter messages for this viewer
       if (payload?.viewerId && payload.viewerId !== viewerId && type !== 'STOP_STREAM') return;
 
       switch (type) {
@@ -258,9 +444,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             setStreamInfo(info);
             setStatus('live');
             
-            // Check if this is a file upload (simulated live) or real live
+            // Check if this is a file upload
             setIsLiveStream(payload.mode !== StreamMode.FILE_UPLOAD);
-            setIsLive(payload.mode !== StreamMode.FILE_UPLOAD);
             
             if (payload.resolution) {
               setAvailableResolutions(prev => {
@@ -273,185 +458,219 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             }
           }
           break;
+          
         case 'SIGNAL_OFFER':
-          await handleOffer(payload.offer, payload.streamId, payload.title, payload.mode, payload.resolution);
+          await handleOffer(
+            payload.offer, 
+            payload.streamId, 
+            payload.title, 
+            payload.mode, 
+            payload.resolution
+          );
           break;
+          
         case 'SIGNAL_ICE_ADMIN':
-          if (pcRef.current && payload.candidate)
-            await pcRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {});
+          if (pcRef.current && payload.candidate) {
+            try {
+              await pcRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate));
+            } catch (e) {
+              console.warn('Error adding ICE candidate:', e);
+            }
+          }
           break;
+          
         case 'STOP_STREAM':
           streamInfoRef.current = null;
           setStreamInfo(null);
           setStatus('ended');
           setErrorMsg('The broadcast has ended.');
-          pcRef.current?.close();
-          if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
-          if (statsTimer.current) clearInterval(statsTimer.current);
+          setHasVideo(false);
+          
+          if (pcRef.current) {
+            pcRef.current.close();
+            pcRef.current = null;
+          }
+          
+          if (heartbeatTimer.current) {
+            clearInterval(heartbeatTimer.current);
+          }
+          
+          if (statsTimer.current) {
+            clearInterval(statsTimer.current);
+          }
+          
+          // Clear video
+          if (videoRef.current) {
+            videoRef.current.srcObject = null;
+          }
           break;
       }
     };
 
     // Announce presence
-    const announce = () => bc.postMessage({ type: 'VIEWER_JOIN', payload: { streamId, viewerId } });
+    const announce = () => {
+      if (bcRef.current) {
+        bcRef.current.postMessage({ 
+          type: 'VIEWER_JOIN', 
+          payload: { streamId, viewerId } 
+        });
+      }
+    };
+    
     announce();
+    
+    // Keep announcing until we get a response
     const joinInterval = setInterval(() => {
-      if (!streamInfoRef.current) announce();
-      else clearInterval(joinInterval);
+      if (!streamInfoRef.current && bcRef.current) {
+        announce();
+      } else {
+        clearInterval(joinInterval);
+      }
     }, 2000);
 
-    // Heartbeat
+    // Send heartbeats
     heartbeatTimer.current = window.setInterval(() => {
-      bc.postMessage({ type: 'VIEWER_HEARTBEAT', payload: { streamId, viewerId } });
+      if (bcRef.current && streamInfoRef.current) {
+        bcRef.current.postMessage({ 
+          type: 'VIEWER_HEARTBEAT', 
+          payload: { streamId, viewerId } 
+        });
+      }
     }, HEARTBEAT_INTERVAL);
 
-    // Leave event
+    // Send leave message on unload
     const sendLeave = () => {
-      bc.postMessage({ type: 'VIEWER_LEAVE', payload: { streamId, viewerId } });
+      if (bcRef.current) {
+        bcRef.current.postMessage({ 
+          type: 'VIEWER_LEAVE', 
+          payload: { streamId, viewerId } 
+        });
+      }
     };
+    
     window.addEventListener('beforeunload', sendLeave);
     window.addEventListener('pagehide', sendLeave);
 
-    // Controls
+    // Mouse movement for controls
     document.addEventListener('mousemove', resetControls);
     document.addEventListener('touchstart', resetControls);
-    document.addEventListener('fullscreenchange', () => setFullscreen(!!document.fullscreenElement));
+    
+    // Fullscreen change
+    document.addEventListener('fullscreenchange', () => {
+      setFullscreen(!!document.fullscreenElement);
+    });
+    
     resetControls();
 
     // Live latency check
     liveCheckTimer.current = window.setInterval(checkLiveLatency, 1000);
 
+    // Cleanup
     return () => {
+      console.log('Viewer unmounting');
+      
       clearInterval(joinInterval);
-      if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
-      if (statsTimer.current) clearInterval(statsTimer.current);
-      if (liveCheckTimer.current) clearInterval(liveCheckTimer.current);
+      
+      if (heartbeatTimer.current) {
+        clearInterval(heartbeatTimer.current);
+      }
+      
+      if (statsTimer.current) {
+        clearInterval(statsTimer.current);
+      }
+      
+      if (liveCheckTimer.current) {
+        clearInterval(liveCheckTimer.current);
+      }
+      
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+      }
 
       sendLeave();
-      bc.close();
-      pcRef.current?.close();
+      
+      if (bcRef.current) {
+        bcRef.current.close();
+      }
+      
+      if (pcRef.current) {
+        pcRef.current.close();
+      }
 
       window.removeEventListener('beforeunload', sendLeave);
       window.removeEventListener('pagehide', sendLeave);
       document.removeEventListener('mousemove', resetControls);
       document.removeEventListener('touchstart', resetControls);
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
+      
+      if (controlsTimer.current) {
+        clearTimeout(controlsTimer.current);
+      }
     };
-  }, [streamId, viewerId]);
+  }, [streamId, viewerId, resetControls, checkLiveLatency, updateStats, safePlay]);
 
-  // Video event bindings
+  // Video event listeners
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     
-    const onTime = () => {
+    const onTimeUpdate = () => {
       setCurrentTime(v.currentTime);
       checkLiveLatency();
     };
     
-    const onDur = () => {
+    const onLoadedMetadata = () => {
       const dur = v.duration || 0;
       setDuration(dur);
-      // If duration is finite, it's not a live stream
+      
+      // If duration is finite and > 0, it's likely a file
       if (isFinite(dur) && dur > 0) {
         setIsLiveStream(false);
-        setIsLive(false);
       }
     };
     
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
+    const onVolumeChange = () => {
+      setMuted(v.muted);
+      setVolume(v.volume);
+    };
+    
     const onProgress = () => {
       if (v.buffered.length > 0) {
         setBuffered(v.buffered.end(v.buffered.length - 1));
       }
     };
     
-    v.addEventListener('timeupdate', onTime);
-    v.addEventListener('loadedmetadata', onDur);
+    const onWaiting = () => {
+      // Show buffering indicator if needed
+    };
+    
+    const onCanPlay = () => {
+      // Video can play
+    };
+    
+    v.addEventListener('timeupdate', onTimeUpdate);
+    v.addEventListener('loadedmetadata', onLoadedMetadata);
     v.addEventListener('play', onPlay);
     v.addEventListener('pause', onPause);
+    v.addEventListener('volumechange', onVolumeChange);
     v.addEventListener('progress', onProgress);
+    v.addEventListener('waiting', onWaiting);
+    v.addEventListener('canplay', onCanPlay);
     
     return () => {
-      v.removeEventListener('timeupdate', onTime);
-      v.removeEventListener('loadedmetadata', onDur);
+      v.removeEventListener('timeupdate', onTimeUpdate);
+      v.removeEventListener('loadedmetadata', onLoadedMetadata);
       v.removeEventListener('play', onPlay);
       v.removeEventListener('pause', onPause);
+      v.removeEventListener('volumechange', onVolumeChange);
       v.removeEventListener('progress', onProgress);
+      v.removeEventListener('waiting', onWaiting);
+      v.removeEventListener('canplay', onCanPlay);
     };
-  }, []);
+  }, [checkLiveLatency]);
 
-  // Player controls
-  const togglePlay = async () => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (v.paused) await safePlay();
-    else safePause();
-  };
-
-  const toggleMute = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.muted = !v.muted;
-    setMuted(v.muted);
-  };
-
-  const changeVolume = (val: number) => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.volume = val;
-    v.muted = val === 0;
-    setVolume(val);
-    setMuted(val === 0);
-  };
-
-  const changePlaybackRate = (rate: number) => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.playbackRate = rate;
-    setPlaybackRate(rate);
-    setShowSettings(false);
-  };
-
-  const changeResolution = (resolution: Resolution) => {
-    setSelectedResolution(resolution);
-    setShowResolutions(false);
-    
-    if (pcRef.current && streamId) {
-      bcRef.current?.postMessage({
-        type: 'VIEWER_JOIN',
-        payload: { streamId, viewerId, resolution }
-      });
-    }
-  };
-
-  const seek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = videoRef.current;
-    if (!v || !duration || isLiveStream) return;
-    v.currentTime = parseFloat(e.target.value);
-  };
-
-  const toggleFullscreen = async () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) await containerRef.current.requestFullscreen().catch(() => {});
-    else await document.exitFullscreen().catch(() => {});
-  };
-
-  const togglePip = async () => {
-    const v = videoRef.current;
-    if (!v) return;
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-        setPip(false);
-      } else {
-        await v.requestPictureInPicture();
-        setPip(true);
-      }
-    } catch { /* unsupported */ }
-  };
-
+  // Calculate percentages
   const volPct = (muted ? 0 : volume) * 100;
   const seekPct = duration ? (currentTime / duration) * 100 : 0;
   const bufferedPct = duration ? (buffered / duration) * 100 : 0;
@@ -459,142 +678,116 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   // Ended screen
   if (status === 'ended') {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+      <div className="min-h-screen bg-black flex items-center justify-center p-4">
         <div className="text-center space-y-4 max-w-sm">
-          <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mx-auto">
-            <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="w-16 h-16 bg-gray-800 rounded-2xl flex items-center justify-center mx-auto">
+            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
           </div>
-          <h2 className="text-xl font-bold text-gray-900">Stream Ended</h2>
+          <h2 className="text-xl font-bold text-white">Stream Ended</h2>
           <p className="text-gray-400 text-sm">{errorMsg}</p>
+          <button
+            onClick={() => (window.location.hash = '#/')}
+            className="mt-4 px-6 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors"
+          >
+            Go Home
+          </button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-white flex flex-col">
-      {/* Title bar */}
-      {!fullscreen && (
-        <div className="bg-white border-b border-gray-100 px-4 sm:px-6 py-4 flex items-center gap-4">
-          <button
-            onClick={() => (window.location.hash = '#/')}
-            className="text-gray-400 hover:text-gray-900 transition-colors flex-shrink-0"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-
-          <div className="flex-1 min-w-0">
-            <h1 className="text-base font-bold text-gray-900 truncate">
-              {streamInfo?.title || 'Connecting…'}
-            </h1>
-            <div className="flex items-center gap-2 mt-0.5">
-              {status === 'live' ? (
-                <>
-                  <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                  <span className="text-xs font-semibold text-red-500">LIVE</span>
-                  {!isLiveStream && (
-                    <span className="text-xs text-gray-400">· Pre-recorded</span>
-                  )}
-                </>
-              ) : (
-                <span className="text-xs text-gray-400">Connecting…</span>
-              )}
-              {stats && stats.bitrate > 0 && isLiveStream && (
-                <span className="text-xs text-gray-400 ml-2">
-                  {Math.round(stats.bitrate / 1000)} kbps · {stats.fps} fps
-                </span>
-              )}
-            </div>
-          </div>
-
-          <span className="text-xs text-gray-300 font-mono flex-shrink-0 hidden sm:inline">🔒 Secured</span>
-        </div>
-      )}
-
-      {/* Video player */}
-      <div className="flex-1 flex flex-col bg-black">
+    <div className="min-h-screen bg-black flex flex-col">
+      {/* Video player container */}
+      <div className="flex-1 flex items-center justify-center relative">
         <div
           ref={containerRef}
-          className="relative w-full flex-1"
-          style={{ minHeight: 0 }}
+          className="relative w-full h-full"
           onMouseMove={resetControls}
           onMouseLeave={() => {
             if (controlsTimer.current) clearTimeout(controlsTimer.current);
-            controlsTimer.current = window.setTimeout(() => setShowControls(false), 800);
+            controlsTimer.current = window.setTimeout(() => setShowControls(false), 1000);
           }}
-          onDoubleClick={toggleFullscreen}
         >
           {/* Video element */}
           <video
             ref={videoRef}
-            autoPlay
+            className="w-full h-full object-contain"
             playsInline
-            className="w-full h-full object-contain bg-black"
-            style={{ display: 'block', minHeight: '100%' }}
-            onContextMenu={e => e.preventDefault()}
+            onClick={togglePlay}
+            onDoubleClick={toggleFullscreen}
           />
 
-          {/* Connecting spinner */}
-          {status === 'connecting' && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 bg-black p-4">
-              <div className="relative w-12 h-12">
-                <div className="absolute inset-0 border-2 border-white/10 rounded-full" />
-                <div className="absolute inset-0 border-2 border-t-white rounded-full animate-spin" />
+          {/* Connecting overlay */}
+          {status === 'connecting' && !hasVideo && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black">
+              <div className="relative w-16 h-16 mb-4">
+                <div className="absolute inset-0 border-4 border-gray-800 rounded-full" />
+                <div className="absolute inset-0 border-4 border-t-red-600 rounded-full animate-spin" />
               </div>
-              <div className="text-center space-y-1">
-                <p className="text-white/50 text-sm font-medium">Connecting to stream…</p>
-                <p className="text-white/20 text-xs font-mono break-all">{streamId}</p>
-              </div>
+              <p className="text-gray-400 text-sm">Connecting to stream...</p>
+              <p className="text-gray-600 text-xs mt-2 font-mono">{streamId}</p>
             </div>
           )}
 
           {/* Controls overlay */}
           <div
-            className={`absolute inset-0 flex flex-col justify-between transition-opacity duration-300 pointer-events-none ${
-              showControls || !playing ? 'opacity-100' : 'opacity-0'
+            className={`absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/30 transition-opacity duration-300 ${
+              showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
             }`}
           >
-            {/* Top gradient */}
-            <div className="bg-gradient-to-b from-black/70 to-transparent pt-5 pb-10 px-4 sm:px-5 pointer-events-auto">
-              {(fullscreen || status === 'live') && streamInfo?.title && (
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-white font-bold text-base sm:text-lg drop-shadow leading-tight truncate">
+            {/* Top bar */}
+            <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => (window.location.hash = '#/')}
+                  className="text-white/70 hover:text-white transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                
+                {streamInfo?.title && (
+                  <div>
+                    <h1 className="text-white font-semibold text-sm sm:text-base truncate max-w-[200px] sm:max-w-[400px]">
                       {streamInfo.title}
-                    </p>
+                    </h1>
                     {status === 'live' && (
                       <div className="flex items-center gap-1.5 mt-1">
-                        <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                        <span className="text-red-400 text-xs font-bold uppercase tracking-wide">
-                          {isLiveStream ? 'LIVE' : 'PRE-RECORDED'}
+                        <span className="w-1.5 h-1.5 bg-red-600 rounded-full animate-pulse" />
+                        <span className="text-red-500 text-xs font-medium uppercase tracking-wider">
+                          {isLiveStream ? 'LIVE' : 'PREMIERE'}
                         </span>
                       </div>
                     )}
                   </div>
-                  {fullscreen && (
-                    <button
-                      onClick={e => { e.stopPropagation(); window.location.hash = '#/'; }}
-                      className="text-white/50 hover:text-white transition-colors flex-shrink-0"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              )}
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-white/50 text-xs hidden sm:block">
+                  {viewerId.slice(0, 8)}
+                </span>
+                <button
+                  onClick={toggleFullscreen}
+                  className="text-white/70 hover:text-white transition-colors p-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  </svg>
+                </button>
+              </div>
             </div>
 
-            {/* Live indicator (when behind) */}
+            {/* Live indicator when behind */}
             {showLiveIndicator && isLiveStream && (
-              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-auto">
+              <div className="absolute top-20 left-1/2 transform -translate-x-1/2">
                 <button
                   onClick={seekToLive}
-                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-full text-sm font-semibold shadow-lg flex items-center gap-2 transition-colors animate-pulse"
+                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-full text-sm font-semibold shadow-lg flex items-center gap-2 transition-colors"
                 >
                   <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
                   LIVE · {Math.round(liveLatency)}s behind
@@ -603,78 +796,64 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             )}
 
             {/* Bottom controls */}
-            <div
-              className="bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 sm:px-5 pb-3 sm:pb-4 pt-12 pointer-events-auto"
-              onClick={e => e.stopPropagation()}
-            >
-              {/* Seek bar */}
-              <div className="mb-3 flex items-center gap-2 sm:gap-3">
-                <span className="text-white/50 text-xs font-mono tabular-nums w-10 text-right">
-                  {fmt(currentTime)}
-                </span>
-                
-                <div className="flex-1 relative group">
-                  {/* Buffered progress */}
-                  <div 
-                    className="absolute h-1 bg-white/20 rounded-full overflow-hidden"
-                    style={{ width: '100%' }}
-                  >
-                    <div 
-                      className="h-full bg-white/40"
+            <div className="absolute bottom-0 left-0 right-0 p-4 space-y-2">
+              {/* Progress bar */}
+              <div className="relative group">
+                <div className="flex items-center gap-2 text-white/70 text-xs">
+                  <span className="tabular-nums">{fmt(currentTime)}</span>
+                  
+                  <div className="flex-1 relative h-1 bg-gray-600 rounded-full overflow-hidden">
+                    {/* Buffered progress */}
+                    <div
+                      className="absolute h-full bg-gray-400"
                       style={{ width: `${bufferedPct}%` }}
+                    />
+                    
+                    {/* Played progress */}
+                    <div
+                      className="absolute h-full bg-red-600"
+                      style={{ width: `${seekPct}%` }}
+                    />
+                    
+                    {/* Seek input */}
+                    <input
+                      type="range"
+                      min={0}
+                      max={duration || 100}
+                      step={0.1}
+                      value={currentTime}
+                      onChange={seek}
+                      disabled={isLiveStream}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-default"
+                    />
+                    
+                    {/* Thumb (visible on hover) */}
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                      style={{ left: `${seekPct}%`, transform: 'translate(-50%, -50%)' }}
                     />
                   </div>
                   
-                  {/* Seek progress */}
-                  <input
-                    type="range"
-                    min={0}
-                    max={duration || 100}
-                    step={0.1}
-                    value={currentTime}
-                    onChange={seek}
-                    disabled={isLiveStream}
-                    className={`w-full h-1 rounded-full appearance-none cursor-pointer bg-transparent relative z-10
-                      [&::-webkit-slider-thumb]:appearance-none
-                      [&::-webkit-slider-thumb]:w-3
-                      [&::-webkit-slider-thumb]:h-3
-                      [&::-webkit-slider-thumb]:rounded-full
-                      [&::-webkit-slider-thumb]:bg-white
-                      [&::-webkit-slider-thumb]:opacity-0
-                      group-hover:[&::-webkit-slider-thumb]:opacity-100
-                      ${isLiveStream ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    style={{
-                      background: isLiveStream ? 'none' : `linear-gradient(to right, white ${seekPct}%, transparent ${seekPct}%)`
-                    }}
-                  />
-                  
-                  {/* Live badge for seek bar */}
-                  {isLiveStream && (
-                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-                      <span className="text-white/30 text-xs font-semibold">LIVE</span>
-                    </div>
-                  )}
+                  <span className="tabular-nums">
+                    {isLiveStream ? 'LIVE' : fmt(duration)}
+                  </span>
                 </div>
-                
-                <span className="text-white/50 text-xs font-mono tabular-nums w-10">
-                  {isLiveStream ? 'LIVE' : fmt(duration)}
-                </span>
               </div>
 
-              {/* Button row */}
-              <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
-                {/* Play / Pause */}
+              {/* Control buttons */}
+              <div className="flex items-center gap-2">
+                {/* Play/Pause */}
                 <button
                   onClick={togglePlay}
-                  className="p-2 sm:p-2.5 text-white hover:text-white/70 transition-colors rounded-lg hover:bg-white/10"
+                  className="text-white hover:text-white/80 transition-colors p-2"
                 >
                   {playing ? (
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
                       <rect x="6" y="4" width="4" height="16" rx="1" />
                       <rect x="14" y="4" width="4" height="16" rx="1" />
                     </svg>
                   ) : (
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
                       <path d="M8 5v14l11-7z" />
                     </svg>
                   )}
@@ -682,75 +861,97 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
 
                 {/* Volume */}
                 <div
-                  className="relative flex items-center"
+                  className="relative"
                   onMouseEnter={() => setShowVolume(true)}
                   onMouseLeave={() => setShowVolume(false)}
                 >
                   <button
                     onClick={toggleMute}
-                    className="p-2 sm:p-2.5 text-white hover:text-white/70 transition-colors rounded-lg hover:bg-white/10"
+                    className="text-white hover:text-white/80 transition-colors p-2"
                   >
                     {muted || volume === 0 ? (
-                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06A8.99 8.99 0 0017.73 19.73L19 21 20.27 19.73 5.54 5 4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
                       </svg>
                     ) : volume < 0.5 ? (
-                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M18.5 12A4.5 4.5 0 0016 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z" />
                       </svg>
                     ) : (
-                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
                       </svg>
                     )}
                   </button>
 
-                  {/* Volume slider popup */}
+                  {/* Volume slider */}
                   {showVolume && (
-                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-gray-900/95 backdrop-blur rounded-2xl px-3 py-3 flex flex-col items-center gap-2 z-10 shadow-xl">
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.02}
-                        value={muted ? 0 : volume}
-                        onChange={e => changeVolume(parseFloat(e.target.value))}
-                        className="h-20 sm:h-24 w-1.5 rounded-full appearance-none cursor-pointer"
-                        style={{
-                          writingMode: 'vertical-lr',
-                          direction: 'rtl',
-                          background: `linear-gradient(to top, white ${volPct}%, rgba(255,255,255,0.2) ${volPct}%)`,
-                        } as React.CSSProperties}
-                      />
-                      <span className="text-white/50 text-xs tabular-nums">{Math.round(volPct)}%</span>
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-gray-900 rounded-lg p-3 shadow-xl">
+                      <div className="relative h-24 w-6">
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={muted ? 0 : volume}
+                          onChange={(e) => changeVolume(parseFloat(e.target.value))}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                          style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
+                        />
+                        <div className="absolute inset-0 bg-gray-700 rounded-full">
+                          <div
+                            className="absolute bottom-0 left-0 right-0 bg-white rounded-full"
+                            style={{ height: `${volPct}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="text-center text-white text-xs mt-1">
+                        {Math.round(volPct)}%
+                      </div>
                     </div>
                   )}
                 </div>
 
-                {/* Resolution selector */}
+                {/* Settings */}
                 <div className="relative">
                   <button
-                    onClick={() => setShowResolutions(!showResolutions)}
-                    className="p-2 sm:p-2.5 text-white hover:text-white/70 transition-colors rounded-lg hover:bg-white/10 hidden sm:block"
-                    title="Quality"
+                    onClick={() => setShowSettings(!showSettings)}
+                    className="text-white hover:text-white/80 transition-colors p-2"
                   >
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M19 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2zm0 16H5V5h14v14zM7 9h10v2H7zm0 4h6v2H7z" />
+                    <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
                     </svg>
                   </button>
 
-                  {showResolutions && (
-                    <div className="absolute bottom-full right-0 mb-2 bg-gray-900/95 backdrop-blur-xl rounded-2xl p-3 w-48 shadow-2xl z-10">
-                      <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2 px-2">Quality</p>
-                      <div className="space-y-0.5 max-h-48 overflow-y-auto">
+                  {showSettings && (
+                    <div className="absolute bottom-full right-0 mb-2 bg-gray-900 rounded-lg p-3 w-48 shadow-xl">
+                      <div className="text-white/70 text-xs font-semibold mb-2">Playback Speed</div>
+                      <div className="space-y-1">
+                        {[0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => (
+                          <button
+                            key={rate}
+                            onClick={() => changePlaybackRate(rate)}
+                            className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
+                              playbackRate === rate
+                                ? 'bg-red-600 text-white'
+                                : 'text-white/70 hover:bg-gray-800'
+                            }`}
+                          >
+                            {rate === 1 ? 'Normal' : `${rate}×`}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="text-white/70 text-xs font-semibold mt-3 mb-2">Quality</div>
+                      <div className="space-y-1">
                         {availableResolutions.map(res => (
                           <button
                             key={`${res.width}x${res.height}`}
                             onClick={() => changeResolution(res)}
-                            className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                            className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
                               selectedResolution.width === res.width
-                                ? 'bg-white/20 text-white font-semibold'
-                                : 'text-white/60 hover:bg-white/10 hover:text-white'
+                                ? 'bg-red-600 text-white'
+                                : 'text-white/70 hover:bg-gray-800'
                             }`}
                           >
                             {res.label}
@@ -761,153 +962,41 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                   )}
                 </div>
 
-                {/* Spacer */}
-                <div className="flex-1" />
-
-                {/* Stats */}
-                {stats && stats.bitrate > 0 && isLiveStream && (
-                  <span className="text-white/50 text-xs hidden sm:block">
+                {/* Stats (if available) */}
+                {stats && stats.bitrate > 0 && (
+                  <div className="text-white/50 text-xs ml-auto">
                     {Math.round(stats.bitrate / 1000)} kbps
-                  </span>
+                  </div>
                 )}
 
-                {/* PiP */}
-                {typeof document !== 'undefined' && 'pictureInPictureEnabled' in document && (document as any).pictureInPictureEnabled && (
+                {/* PiP (if supported) */}
+                {typeof document !== 'undefined' && 'pictureInPictureEnabled' in document && (
                   <button
                     onClick={togglePip}
-                    className={`p-2 sm:p-2.5 transition-colors rounded-lg hover:bg-white/10 ${pip ? 'text-blue-400' : 'text-white/70 hover:text-white'}`}
-                    title="Picture in Picture"
+                    className={`text-white hover:text-white/80 transition-colors p-2 ${
+                      pip ? 'text-red-500' : ''
+                    }`}
                   >
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
                       <path d="M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 1.98 2 1.98h18c1.1 0 2-.88 2-1.98V5c0-1.1-.9-2-2-2zm0 16.01H3V4.98h18v14.03z" />
                     </svg>
                   </button>
                 )}
 
-                {/* Settings */}
-                <div className="relative">
-                  <button
-                    onClick={() => setShowSettings(s => !s)}
-                    className={`p-2 sm:p-2.5 transition-colors rounded-lg hover:bg-white/10 ${showSettings ? 'text-white' : 'text-white/70 hover:text-white'}`}
-                    title="Settings"
-                  >
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96a7.02 7.02 0 00-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" />
-                    </svg>
-                  </button>
-
-                  {showSettings && (
-                    <div className="absolute bottom-full right-0 mb-2 bg-gray-900/95 backdrop-blur-xl rounded-2xl p-4 w-48 shadow-2xl z-10">
-                      <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">Speed</p>
-                      <div className="space-y-0.5">
-                        {[0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => (
-                          <button
-                            key={rate}
-                            onClick={() => changePlaybackRate(rate)}
-                            className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
-                              playbackRate === rate
-                                ? 'bg-white/20 text-white font-semibold'
-                                : 'text-white/60 hover:bg-white/10 hover:text-white'
-                            }`}
-                          >
-                            {rate === 1 ? 'Normal' : `${rate}×`}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
                 {/* Fullscreen */}
                 <button
                   onClick={toggleFullscreen}
-                  className="p-2 sm:p-2.5 text-white hover:text-white/70 transition-colors rounded-lg hover:bg-white/10"
-                  title="Fullscreen"
+                  className="text-white hover:text-white/80 transition-colors p-2"
                 >
-                  {fullscreen ? (
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 9L4 4m0 0v5m0-5h5m6-1h5m0 0v5m0-5l-5 5M9 15l-5 5m0 0h5m-5 0v-5m16 0v5m0 0h-5m5 0l-5-5" />
-                    </svg>
-                  ) : (
-                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-                    </svg>
-                  )}
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  </svg>
                 </button>
               </div>
-            </div>
-          </div>
-
-          {/* Subtle watermark */}
-          <div className="absolute inset-0 pointer-events-none select-none overflow-hidden opacity-[0.03]">
-            <div
-              className="absolute text-white font-black uppercase whitespace-nowrap"
-              style={{ fontSize: 'clamp(2rem, 5vw, 5rem)', top: '20%', left: '5%', transform: 'rotate(-12deg)' }}
-            >
-              {viewerId.slice(0, 8)}
             </div>
           </div>
         </div>
       </div>
-
-      {/* Below-video info bar */}
-      {!fullscreen && (
-        <div className="bg-white border-t border-gray-100 px-4 sm:px-6 py-3 sm:py-4">
-          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <h2 className="text-sm font-bold text-gray-900 truncate">
-                {streamInfo?.title || 'Live Stream'}
-              </h2>
-              <p className="text-xs text-gray-400 mt-0.5">
-                {status === 'connecting'
-                  ? 'Waiting for broadcaster…'
-                  : status === 'live'
-                  ? isLiveStream ? 'Streaming live now' : 'Playing pre-recorded content'
-                  : 'Stream ended'}
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              {/* Mobile resolution selector */}
-              <div className="relative sm:hidden">
-                <button
-                  onClick={() => setShowResolutions(!showResolutions)}
-                  className="text-xs text-gray-400 hover:text-gray-900 transition-colors flex items-center gap-1"
-                >
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M19 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2zm0 16H5V5h14v14zM7 9h10v2H7zm0 4h6v2H7z" />
-                  </svg>
-                  <span>{selectedResolution.label.split(' ')[0]}</span>
-                </button>
-
-                {showResolutions && (
-                  <div className="absolute bottom-full right-0 mb-2 bg-white rounded-2xl shadow-xl p-3 w-48 border border-gray-200 z-10">
-                    <p className="text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2 px-2">Quality</p>
-                    <div className="space-y-0.5 max-h-48 overflow-y-auto">
-                      {availableResolutions.map(res => (
-                        <button
-                          key={`${res.width}x${res.height}`}
-                          onClick={() => changeResolution(res)}
-                          className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
-                            selectedResolution.width === res.width
-                              ? 'bg-gray-900 text-white font-semibold'
-                              : 'text-gray-600 hover:bg-gray-100'
-                          }`}
-                        >
-                          {res.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <span className="text-xs text-gray-200 font-mono flex-shrink-0 hidden sm:inline">
-                🔒 {viewerId.slice(0, 10)}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
