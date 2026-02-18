@@ -1,0 +1,9 @@
+{
+  "name": "SecureStream AI",
+  "description": "A professional-grade, secure live streaming application with unique URL generation, admin controls, and AI-powered stream assistance.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ]
+}
