@@ -1,4 +1,4 @@
-// ViewerPage.tsx (updated with resolution switching)
+// ViewerPage.tsx
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { StreamMode, Resolution } from '../types';
 
@@ -6,12 +6,20 @@ interface ViewerPageProps {
   streamId: string;
 }
 
-const fmt = (s: number) =>
-  isFinite(s) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
+const fmt = (s: number) => {
+  if (!isFinite(s) || s < 0) return '0:00';
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const seconds = Math.floor(s % 60);
+  
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+};
 
 const HEARTBEAT_INTERVAL = 5000;
 
-// Available resolutions for viewers
 const VIEWER_RESOLUTIONS: Resolution[] = [
   { width: 640, height: 480, label: '480p (SD)' },
   { width: 854, height: 480, label: '480p (16:9)' },
@@ -33,14 +41,19 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [showControls, setShowControls] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [buffered, setBuffered] = useState(0);
   const [showVolume, setShowVolume] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [pip, setPip] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [selectedResolution, setSelectedResolution] = useState<Resolution>(VIEWER_RESOLUTIONS[3]); // 720p default
+  const [selectedResolution, setSelectedResolution] = useState<Resolution>(VIEWER_RESOLUTIONS[3]);
   const [availableResolutions, setAvailableResolutions] = useState<Resolution[]>(VIEWER_RESOLUTIONS);
   const [showResolutions, setShowResolutions] = useState(false);
   const [stats, setStats] = useState<{ bitrate: number; fps: number } | null>(null);
+  const [isLive, setIsLive] = useState(true);
+  const [liveLatency, setLiveLatency] = useState(0);
+  const [showLiveIndicator, setShowLiveIndicator] = useState(false);
+  const [isLiveStream, setIsLiveStream] = useState(true); // True for WebRTC live, false for file upload
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -51,13 +64,15 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const streamInfoRef = useRef<typeof streamInfo>(null);
   const heartbeatTimer = useRef<number | null>(null);
   const statsTimer = useRef<number | null>(null);
+  const lastLiveTimeRef = useRef<number>(Date.now());
+  const liveCheckTimer = useRef<number | null>(null);
 
   const viewerId = useMemo(
     () => `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
     []
   );
 
-  // ── Safe play ─────────────────────────────────────────────────────────────
+  // Safe play
   const safePlay = async () => {
     const v = videoRef.current;
     if (!v) return;
@@ -73,7 +88,33 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     }
   };
 
-  // ── Controls auto-hide ───────────────────────────────────────────────────
+  // Safe pause
+  const safePause = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    try {
+      v.pause();
+      setPlaying(false);
+    } catch (e) {
+      console.error('Pause error:', e);
+    }
+  };
+
+  // Seek to live
+  const seekToLive = () => {
+    const v = videoRef.current;
+    if (!v || !isLiveStream) return;
+    
+    // For live WebRTC streams, we can't seek forward, but we can pause/resume
+    // The video will continue playing from the current live point
+    if (v.paused) {
+      safePlay();
+    }
+    
+    setShowLiveIndicator(false);
+  };
+
+  // Reset controls timer
   const resetControls = () => {
     setShowControls(true);
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
@@ -85,7 +126,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     }, 3500);
   };
 
-  // ── Get stream statistics ────────────────────────────────────────────────
+  // Update stats
   const updateStats = () => {
     if (!pcRef.current || !videoRef.current) return;
     
@@ -94,8 +135,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       : null;
     
     if (videoTrack && 'getStats' in pcRef.current) {
-      // @ts-ignore - getStats is available but types are complex
-      pcRef.current.getStats(null).then((reports: any) => {
+      (pcRef.current as any).getStats(null).then((reports: any) => {
         let bitrate = 0;
         let fps = 0;
         
@@ -111,12 +151,33 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     }
   };
 
-  // ── Main effect ───────────────────────────────────────────────────────────
+  // Check if viewer is behind live
+  const checkLiveLatency = () => {
+    const v = videoRef.current;
+    if (!v || !isLiveStream) return;
+    
+    if (v.buffered.length > 0) {
+      const bufferedEnd = v.buffered.end(v.buffered.length - 1);
+      const currentTime = v.currentTime;
+      const latency = bufferedEnd - currentTime;
+      
+      setLiveLatency(latency);
+      
+      // If latency > 2 seconds, show "Live" indicator
+      if (latency > 2 && !v.paused) {
+        setShowLiveIndicator(true);
+      } else {
+        setShowLiveIndicator(false);
+      }
+    }
+  };
+
+  // Main effect
   useEffect(() => {
     const bc = new BroadcastChannel('secure_stream_channel');
     bcRef.current = bc;
 
-    // ── WebRTC offer handler ──────────────────────────────────────────────
+    // WebRTC offer handler
     const handleOffer = async (
       offer: RTCSessionDescriptionInit,
       offerStreamId: string,
@@ -143,11 +204,15 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       pc.ontrack = async event => {
         const v = videoRef.current;
         if (!v) return;
+        
+        // This is a live WebRTC stream
+        setIsLiveStream(true);
+        setIsLive(true);
+        
         v.srcObject = event.streams[0];
         setStatus('live');
         await safePlay();
         
-        // Start stats collection
         if (statsTimer.current) clearInterval(statsTimer.current);
         statsTimer.current = window.setInterval(updateStats, 2000);
       };
@@ -169,7 +234,6 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       streamInfoRef.current = info;
       setStreamInfo(info);
       
-      // Update available resolutions if provided
       if (streamResolution) {
         setAvailableResolutions(prev => {
           const exists = prev.some(r => r.width === streamResolution.width);
@@ -181,7 +245,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       }
     };
 
-    // ── Message handler ───────────────────────────────────────────────────
+    // Message handler
     bc.onmessage = async (event) => {
       const { type, payload } = event.data;
       if (payload?.viewerId && payload.viewerId !== viewerId && type !== 'STOP_STREAM') return;
@@ -193,6 +257,10 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             streamInfoRef.current = info;
             setStreamInfo(info);
             setStatus('live');
+            
+            // Check if this is a file upload (simulated live) or real live
+            setIsLiveStream(payload.mode !== StreamMode.FILE_UPLOAD);
+            setIsLive(payload.mode !== StreamMode.FILE_UPLOAD);
             
             if (payload.resolution) {
               setAvailableResolutions(prev => {
@@ -224,7 +292,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       }
     };
 
-    // ── Announce presence & retry until admin responds ────────────────────
+    // Announce presence
     const announce = () => bc.postMessage({ type: 'VIEWER_JOIN', payload: { streamId, viewerId } });
     announce();
     const joinInterval = setInterval(() => {
@@ -232,12 +300,12 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       else clearInterval(joinInterval);
     }, 2000);
 
-    // ── Heartbeat ──────────────────────────────────────────────────────────
+    // Heartbeat
     heartbeatTimer.current = window.setInterval(() => {
       bc.postMessage({ type: 'VIEWER_HEARTBEAT', payload: { streamId, viewerId } });
     }, HEARTBEAT_INTERVAL);
 
-    // ── Reliable leave on tab/window close ────────────────────────────────
+    // Leave event
     const sendLeave = () => {
       bc.postMessage({ type: 'VIEWER_LEAVE', payload: { streamId, viewerId } });
     };
@@ -250,10 +318,14 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     document.addEventListener('fullscreenchange', () => setFullscreen(!!document.fullscreenElement));
     resetControls();
 
+    // Live latency check
+    liveCheckTimer.current = window.setInterval(checkLiveLatency, 1000);
+
     return () => {
       clearInterval(joinInterval);
       if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
       if (statsTimer.current) clearInterval(statsTimer.current);
+      if (liveCheckTimer.current) clearInterval(liveCheckTimer.current);
 
       sendLeave();
       bc.close();
@@ -267,35 +339,55 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     };
   }, [streamId, viewerId]);
 
-  // ── Video event bindings ──────────────────────────────────────────────────
+  // Video event bindings
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const onTime = () => setCurrentTime(v.currentTime);
-    const onDur = () => setDuration(v.duration || 0);
+    
+    const onTime = () => {
+      setCurrentTime(v.currentTime);
+      checkLiveLatency();
+    };
+    
+    const onDur = () => {
+      const dur = v.duration || 0;
+      setDuration(dur);
+      // If duration is finite, it's not a live stream
+      if (isFinite(dur) && dur > 0) {
+        setIsLiveStream(false);
+        setIsLive(false);
+      }
+    };
+    
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
+    const onProgress = () => {
+      if (v.buffered.length > 0) {
+        setBuffered(v.buffered.end(v.buffered.length - 1));
+      }
+    };
+    
     v.addEventListener('timeupdate', onTime);
     v.addEventListener('loadedmetadata', onDur);
     v.addEventListener('play', onPlay);
     v.addEventListener('pause', onPause);
+    v.addEventListener('progress', onProgress);
+    
     return () => {
       v.removeEventListener('timeupdate', onTime);
       v.removeEventListener('loadedmetadata', onDur);
       v.removeEventListener('play', onPlay);
       v.removeEventListener('pause', onPause);
+      v.removeEventListener('progress', onProgress);
     };
   }, []);
 
-  // ── Player controls ───────────────────────────────────────────────────────
+  // Player controls
   const togglePlay = async () => {
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) await safePlay();
-    else {
-      v.pause();
-      setPlaying(false);
-    }
+    else safePause();
   };
 
   const toggleMute = () => {
@@ -326,9 +418,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     setSelectedResolution(resolution);
     setShowResolutions(false);
     
-    // Request stream with new resolution
     if (pcRef.current && streamId) {
-      // Re-negotiate WebRTC with new resolution
       bcRef.current?.postMessage({
         type: 'VIEWER_JOIN',
         payload: { streamId, viewerId, resolution }
@@ -338,7 +428,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
 
   const seek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = videoRef.current;
-    if (!v || !duration) return;
+    if (!v || !duration || isLiveStream) return;
     v.currentTime = parseFloat(e.target.value);
   };
 
@@ -362,11 +452,11 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     } catch { /* unsupported */ }
   };
 
-  const isLiveOnly = !duration || !isFinite(duration);
   const volPct = (muted ? 0 : volume) * 100;
   const seekPct = duration ? (currentTime / duration) * 100 : 0;
+  const bufferedPct = duration ? (buffered / duration) * 100 : 0;
 
-  // ── Ended screen ──
+  // Ended screen
   if (status === 'ended') {
     return (
       <div className="min-h-screen bg-white flex items-center justify-center p-4">
@@ -383,10 +473,9 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     );
   }
 
-  // ── Main viewer ───────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-white flex flex-col">
-      {/* ── Title bar (hidden in fullscreen) ── */}
+      {/* Title bar */}
       {!fullscreen && (
         <div className="bg-white border-b border-gray-100 px-4 sm:px-6 py-4 flex items-center gap-4">
           <button
@@ -406,12 +495,15 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
               {status === 'live' ? (
                 <>
                   <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                  <span className="text-xs font-semibold text-red-500">Live</span>
+                  <span className="text-xs font-semibold text-red-500">LIVE</span>
+                  {!isLiveStream && (
+                    <span className="text-xs text-gray-400">· Pre-recorded</span>
+                  )}
                 </>
               ) : (
                 <span className="text-xs text-gray-400">Connecting…</span>
               )}
-              {stats && stats.bitrate > 0 && (
+              {stats && stats.bitrate > 0 && isLiveStream && (
                 <span className="text-xs text-gray-400 ml-2">
                   {Math.round(stats.bitrate / 1000)} kbps · {stats.fps} fps
                 </span>
@@ -423,7 +515,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
         </div>
       )}
 
-      {/* ── Video player ── */}
+      {/* Video player */}
       <div className="flex-1 flex flex-col bg-black">
         <div
           ref={containerRef}
@@ -434,7 +526,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             if (controlsTimer.current) clearTimeout(controlsTimer.current);
             controlsTimer.current = window.setTimeout(() => setShowControls(false), 800);
           }}
-          onClick={togglePlay}
+          onDoubleClick={toggleFullscreen}
         >
           {/* Video element */}
           <video
@@ -460,13 +552,13 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             </div>
           )}
 
-          {/* ── Controls overlay ── */}
+          {/* Controls overlay */}
           <div
             className={`absolute inset-0 flex flex-col justify-between transition-opacity duration-300 pointer-events-none ${
               showControls || !playing ? 'opacity-100' : 'opacity-0'
             }`}
           >
-            {/* Top gradient + title */}
+            {/* Top gradient */}
             <div className="bg-gradient-to-b from-black/70 to-transparent pt-5 pb-10 px-4 sm:px-5 pointer-events-auto">
               {(fullscreen || status === 'live') && streamInfo?.title && (
                 <div className="flex items-start justify-between gap-4">
@@ -477,7 +569,9 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                     {status === 'live' && (
                       <div className="flex items-center gap-1.5 mt-1">
                         <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                        <span className="text-red-400 text-xs font-bold uppercase tracking-wide">Live</span>
+                        <span className="text-red-400 text-xs font-bold uppercase tracking-wide">
+                          {isLiveStream ? 'LIVE' : 'PRE-RECORDED'}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -495,54 +589,77 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
               )}
             </div>
 
+            {/* Live indicator (when behind) */}
+            {showLiveIndicator && isLiveStream && (
+              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-auto">
+                <button
+                  onClick={seekToLive}
+                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-full text-sm font-semibold shadow-lg flex items-center gap-2 transition-colors animate-pulse"
+                >
+                  <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+                  LIVE · {Math.round(liveLatency)}s behind
+                </button>
+              </div>
+            )}
+
             {/* Bottom controls */}
             <div
               className="bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 sm:px-5 pb-3 sm:pb-4 pt-12 pointer-events-auto"
               onClick={e => e.stopPropagation()}
             >
-              {/* Seek bar (file upload only) */}
-              {!isLiveOnly && (
-                <div className="mb-3 flex items-center gap-2 sm:gap-3">
-                  <span className="text-white/50 text-xs font-mono tabular-nums w-10 text-right">
-                    {fmt(currentTime)}
-                  </span>
-                  <div className="flex-1 relative group">
-                    <input
-                      type="range"
-                      min={0}
-                      max={duration || 100}
-                      step={0.1}
-                      value={currentTime}
-                      onChange={seek}
-                      className="w-full h-1 rounded-full appearance-none cursor-pointer bg-white/20
-                        [&::-webkit-slider-thumb]:appearance-none
-                        [&::-webkit-slider-thumb]:w-3
-                        [&::-webkit-slider-thumb]:h-3
-                        [&::-webkit-slider-thumb]:rounded-full
-                        [&::-webkit-slider-thumb]:bg-white
-                        [&::-webkit-slider-thumb]:opacity-0
-                        group-hover:[&::-webkit-slider-thumb]:opacity-100"
-                      style={{ background: `linear-gradient(to right,white ${seekPct}%,rgba(255,255,255,0.2) ${seekPct}%)` }}
+              {/* Seek bar */}
+              <div className="mb-3 flex items-center gap-2 sm:gap-3">
+                <span className="text-white/50 text-xs font-mono tabular-nums w-10 text-right">
+                  {fmt(currentTime)}
+                </span>
+                
+                <div className="flex-1 relative group">
+                  {/* Buffered progress */}
+                  <div 
+                    className="absolute h-1 bg-white/20 rounded-full overflow-hidden"
+                    style={{ width: '100%' }}
+                  >
+                    <div 
+                      className="h-full bg-white/40"
+                      style={{ width: `${bufferedPct}%` }}
                     />
                   </div>
-                  <span className="text-white/50 text-xs font-mono tabular-nums w-10">
-                    {fmt(duration)}
-                  </span>
+                  
+                  {/* Seek progress */}
+                  <input
+                    type="range"
+                    min={0}
+                    max={duration || 100}
+                    step={0.1}
+                    value={currentTime}
+                    onChange={seek}
+                    disabled={isLiveStream}
+                    className={`w-full h-1 rounded-full appearance-none cursor-pointer bg-transparent relative z-10
+                      [&::-webkit-slider-thumb]:appearance-none
+                      [&::-webkit-slider-thumb]:w-3
+                      [&::-webkit-slider-thumb]:h-3
+                      [&::-webkit-slider-thumb]:rounded-full
+                      [&::-webkit-slider-thumb]:bg-white
+                      [&::-webkit-slider-thumb]:opacity-0
+                      group-hover:[&::-webkit-slider-thumb]:opacity-100
+                      ${isLiveStream ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    style={{
+                      background: isLiveStream ? 'none' : `linear-gradient(to right, white ${seekPct}%, transparent ${seekPct}%)`
+                    }}
+                  />
+                  
+                  {/* Live badge for seek bar */}
+                  {isLiveStream && (
+                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+                      <span className="text-white/30 text-xs font-semibold">LIVE</span>
+                    </div>
+                  )}
                 </div>
-              )}
-
-              {/* Live progress bar */}
-              {isLiveOnly && status === 'live' && (
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="flex-1 h-0.5 bg-white/20 rounded-full overflow-hidden">
-                    <div className="h-full bg-red-500 w-full" />
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                    <span className="text-red-400 text-xs font-bold uppercase tracking-wide">Live</span>
-                  </div>
-                </div>
-              )}
+                
+                <span className="text-white/50 text-xs font-mono tabular-nums w-10">
+                  {isLiveStream ? 'LIVE' : fmt(duration)}
+                </span>
+              </div>
 
               {/* Button row */}
               <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
@@ -647,8 +764,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                 {/* Spacer */}
                 <div className="flex-1" />
 
-                {/* Stats (mobile) */}
-                {stats && stats.bitrate > 0 && (
+                {/* Stats */}
+                {stats && stats.bitrate > 0 && isLiveStream && (
                   <span className="text-white/50 text-xs hidden sm:block">
                     {Math.round(stats.bitrate / 1000)} kbps
                   </span>
@@ -733,7 +850,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
         </div>
       </div>
 
-      {/* ── Below-video info bar ── */}
+      {/* Below-video info bar */}
       {!fullscreen && (
         <div className="bg-white border-t border-gray-100 px-4 sm:px-6 py-3 sm:py-4">
           <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
@@ -745,7 +862,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                 {status === 'connecting'
                   ? 'Waiting for broadcaster…'
                   : status === 'live'
-                  ? 'Streaming live now'
+                  ? isLiveStream ? 'Streaming live now' : 'Playing pre-recorded content'
                   : 'Stream ended'}
               </p>
             </div>
