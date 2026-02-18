@@ -1,9 +1,28 @@
 {
-  "name": "SecureStream AI",
-  "description": "A professional-grade, secure live streaming application with unique URL generation, admin controls, and AI-powered stream assistance.",
+  "name": "StreamStudio",
+  "version": "1.0.0",
+  "description": "A professional-grade, secure live streaming application with unique URL generation, admin controls, and AI-powered stream assistance. Features include adaptive bitrate streaming, end-to-end encryption, real-time analytics, and automated moderation.",
+  "author": "StreamStudio Team",
+  "license": "MIT",
+  "repository": "https://github.com/streamstudio/streamstudio",
+  "homepage": "https://streamstudio.io",
+  "keywords": ["live streaming", "broadcasting", "video", "AI", "security", "professional"],
   "requestFramePermissions": [
     "camera",
     "microphone",
     "display-capture"
-  ]
+  ],
+  "requiredPermissions": [
+    "geolocation",
+    "notifications",
+    "persistent-storage"
+  ],
+  "features": {
+    "aiAssistant": true,
+    "adaptiveBitrate": true,
+    "e2eEncryption": true,
+    "multiPlatform": true,
+    "analytics": true,
+    "moderation": true
+  }
 }

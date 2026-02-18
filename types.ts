@@ -8,7 +8,7 @@ export enum StreamMode {
 export type StreamMessageType =
   | 'STREAM_UPDATE'
   | 'VIEWER_JOIN'
-  | 'VIEWER_HEARTBEAT'  
+  | 'VIEWER_HEARTBEAT'
   | 'VIEWER_LEAVE'
   | 'STOP_STREAM'
   | 'SIGNAL_OFFER'
@@ -24,18 +24,14 @@ export interface StreamMessage<T = unknown> {
 export interface VideoDevice {
   deviceId: string;
   label: string;
-  /** Optional group identifier for multi-camera setups */
   groupId?: string;
-  /** Optional kind hint, e.g. "videoinput" */
   kind?: string;
 }
 
 export interface AudioDevice {
   deviceId: string;
   label: string;
-  /** Optional group identifier */
   groupId?: string;
-  /** Optional kind hint, e.g. "audioinput" */
   kind?: string;
 }
 
@@ -43,7 +39,6 @@ export interface Resolution {
   width: number;
   height: number;
   label: string;
-  /** Optional frame-rate hint */
   frameRate?: number;
 }
 
@@ -53,10 +48,7 @@ export interface StreamInfo {
   mode: StreamMode;
   resolution: Resolution;
   hasAudio: boolean;
-  /** Optional start timestamp (ISO string) */
   startedAt?: string;
-  /** Optional viewer count */
   viewerCount?: number;
-  /** Optional thumbnail URL */
   thumbnailUrl?: string;
 }
