@@ -36,15 +36,20 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [isLiveStream, setIsLiveStream] = useState(true);
   const [hasVideo, setHasVideo] = useState(false);
   const [hasAudio, setHasAudio] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
   const [stats, setStats] = useState({ resolution: 'Loading...', bitrate: 0 });
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const peerRef = useRef<any>(null);
   const callRef = useRef<any>(null);
   const controlsTimer = useRef<number | null>(null);
   const retryTimer = useRef<number | null>(null);
+  const audioAnimationRef = useRef<number | null>(null);
   const isConnectingRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -66,22 +71,114 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     return `${(bps / 1000000).toFixed(1)} Mbps`;
   };
 
+  // Initialize audio context for visualization
+  const initAudioAnalysis = useCallback((stream: MediaStream) => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+
+      const audioContext = audioContextRef.current;
+      
+      // Resume audio context if it's suspended (browser autoplay policies)
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+
+      // Create analyser
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+
+      // Create source from audio tracks
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        // Create a new MediaStream with only audio tracks
+        const audioStream = new MediaStream(audioTracks);
+        sourceRef.current = audioContext.createMediaStreamSource(audioStream);
+        sourceRef.current.connect(analyser);
+        
+        // Don't connect to destination to avoid double audio
+        // analyser.connect(audioContext.destination);
+        
+        // Start monitoring audio levels
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        
+        const updateAudioLevel = () => {
+          if (!analyserRef.current || !mountedRef.current) return;
+          
+          analyserRef.current.getByteFrequencyData(dataArray);
+          
+          // Calculate average volume level (0-255)
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i];
+          }
+          const avg = sum / dataArray.length;
+          // Convert to 0-1 range with some sensitivity
+          const level = Math.min(1, avg / 128);
+          setAudioLevel(level);
+          
+          audioAnimationRef.current = requestAnimationFrame(updateAudioLevel);
+        };
+        
+        updateAudioLevel();
+      }
+    } catch (err) {
+      console.warn('[Viewer] Audio analysis not supported:', err);
+    }
+  }, []);
+
+  // Clean up audio analysis
+  const cleanupAudioAnalysis = useCallback(() => {
+    if (audioAnimationRef.current) {
+      cancelAnimationFrame(audioAnimationRef.current);
+      audioAnimationRef.current = null;
+    }
+    
+    if (sourceRef.current) {
+      try {
+        sourceRef.current.disconnect();
+      } catch {}
+      sourceRef.current = null;
+    }
+    
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch {}
+      audioContextRef.current = null;
+    }
+    
+    analyserRef.current = null;
+    setAudioLevel(0);
+  }, []);
+
   const safePlay = useCallback(async () => {
     const video = videoRef.current;
     if (!video) return false;
     
     try {
+      // Ensure video is not muted by default
+      video.muted = false;
+      video.volume = volume;
+      
       if (video.paused) {
-        await video.play();
-        setPlaying(true);
-        return true;
+        // Some browsers require user interaction to play audio
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+          setPlaying(true);
+          return true;
+        }
       }
       return true;
     } catch (e) {
       console.warn('[Viewer] Play failed:', e);
+      // If autoplay failed, we'll need user interaction
       return false;
     }
-  }, []);
+  }, [volume]);
 
   const togglePlay = useCallback(async () => {
     const video = videoRef.current;
@@ -153,6 +250,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
 
   // Destroy peer connection
   const destroyPeer = useCallback(() => {
+    cleanupAudioAnalysis();
+    
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -166,7 +265,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       peerRef.current = null;
     }
     isConnectingRef.current = false;
-  }, []);
+  }, [cleanupAudioAnalysis]);
 
   // Connect to broadcaster
   const connectToBroadcaster = useCallback(() => {
@@ -185,77 +284,146 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
         console.log('[Viewer] Connected to signaling');
         isConnectingRef.current = false;
         
-        // Create dummy stream for call
-        const canvas = document.createElement('canvas');
-        canvas.width = 2;
-        canvas.height = 2;
-        const dummyStream = canvas.captureStream(1);
-        
-        const call = peer.call(adminPeerId, dummyStream);
-        callRef.current = call;
+        // Create a proper audio+video dummy stream for the call
+        // This ensures audio is negotiated in the SDP
+        const setupDummyStream = async () => {
+          try {
+            // Try to get a dummy audio context to create a silent audio track
+            const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const dst = oscillator.connect(audioContext.createMediaStreamDestination());
+            oscillator.start();
+            
+            // Create canvas for video
+            const canvas = document.createElement('canvas');
+            canvas.width = 2;
+            canvas.height = 2;
+            const canvasStream = canvas.captureStream(1);
+            
+            // Combine audio and video streams
+            const tracks = [
+              ...dst.stream.getAudioTracks(),
+              ...canvasStream.getVideoTracks()
+            ];
+            
+            const dummyStream = new MediaStream(tracks);
+            
+            // Make the call with the combined stream
+            const call = peer.call(adminPeerId, dummyStream);
+            callRef.current = call;
 
-        call.on('stream', (remoteStream: MediaStream) => {
-          if (!mountedRef.current) return;
-          
-          console.log('[Viewer] Received stream');
-          console.log('[Viewer] Stream tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
-          
-          const video = videoRef.current;
-          if (video) {
-            // Ensure video is not muted by default
-            video.muted = false;
-            video.volume = 1;
-            
-            video.srcObject = remoteStream;
-            
-            // Check for audio tracks
-            const audioTracks = remoteStream.getAudioTracks();
-            setHasAudio(audioTracks.length > 0);
-            
-            if (audioTracks.length > 0) {
-              console.log('[Viewer] Audio tracks found:', audioTracks.length);
-              // Ensure audio tracks are enabled
-              audioTracks.forEach(track => {
-                track.enabled = true;
-              });
-            } else {
-              console.warn('[Viewer] No audio tracks in stream');
-            }
-            
-            setHasVideo(true);
-            setStatus('live');
-            setIsBuffering(false);
-            
-            // Small delay to ensure stream is properly attached
+            // Stop oscillator after call is established
             setTimeout(() => {
-              safePlay();
-            }, 100);
+              oscillator.stop();
+              audioContext.close();
+            }, 1000);
 
-            // Update stream info
-            const videoTrack = remoteStream.getVideoTracks()[0];
-            if (videoTrack) {
-              const settings = videoTrack.getSettings();
-              setStats({
-                resolution: settings.width && settings.height 
-                  ? `${settings.width}x${settings.height}`
-                  : 'Unknown',
-                bitrate: 0
-              });
-            }
+            setupCallHandlers(call);
+          } catch (err) {
+            console.warn('[Viewer] Could not create audio track, falling back to video only');
+            // Fallback to video-only dummy stream
+            const canvas = document.createElement('canvas');
+            canvas.width = 2;
+            canvas.height = 2;
+            const dummyStream = canvas.captureStream(1);
+            
+            const call = peer.call(adminPeerId, dummyStream);
+            callRef.current = call;
+            
+            setupCallHandlers(call);
           }
-        });
+        };
 
-        call.on('close', () => {
-          if (!mountedRef.current) return;
-          setStatus('ended');
-          setErrorMsg('The broadcast has ended');
-          if (videoRef.current) videoRef.current.srcObject = null;
-        });
+        const setupCallHandlers = (call: any) => {
+          call.on('stream', (remoteStream: MediaStream) => {
+            if (!mountedRef.current) return;
+            
+            console.log('[Viewer] Received stream');
+            console.log('[Viewer] Stream tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled} (${t.readyState})`));
+            
+            const video = videoRef.current;
+            if (video) {
+              // Check for audio tracks
+              const audioTracks = remoteStream.getAudioTracks();
+              const videoTracks = remoteStream.getVideoTracks();
+              
+              setHasAudio(audioTracks.length > 0);
+              setHasVideo(videoTracks.length > 0);
+              
+              if (audioTracks.length > 0) {
+                console.log('[Viewer] Audio tracks found:', audioTracks.length);
+                
+                // Ensure audio tracks are enabled
+                audioTracks.forEach(track => {
+                  track.enabled = true;
+                  console.log(`[Viewer] Audio track ${track.id} enabled: ${track.enabled}, muted: ${track.muted}`);
+                });
+                
+                // Initialize audio analysis
+                initAudioAnalysis(remoteStream);
+              } else {
+                console.warn('[Viewer] No audio tracks in stream');
+              }
+              
+              // Set the stream to video element
+              video.srcObject = remoteStream;
+              
+              // Explicitly set audio properties
+              video.muted = false;
+              video.volume = volume;
+              
+              // Force audio to be enabled
+              if (audioTracks.length > 0) {
+                // Some browsers need this to enable audio
+                setTimeout(() => {
+                  if (video) {
+                    video.muted = false;
+                    // Force a small play/pause to activate audio
+                    if (!video.paused) {
+                      video.pause();
+                      video.play().catch(e => console.warn('[Viewer] Replay failed:', e));
+                    }
+                  }
+                }, 500);
+              }
+              
+              // Try to play
+              safePlay().catch(() => {
+                // Autoplay prevented, user will need to click play
+                setPlaying(false);
+              });
 
-        call.on('error', (err: any) => {
-          console.warn('[Viewer] Call error:', err);
-          setConnectionAttempts(prev => prev + 1);
-        });
+              // Update stream info
+              if (videoTracks.length > 0) {
+                const settings = videoTracks[0].getSettings();
+                setStats({
+                  resolution: settings.width && settings.height 
+                    ? `${settings.width}x${settings.height}`
+                    : 'Unknown',
+                  bitrate: 0
+                });
+              }
+              
+              setStatus('live');
+              setIsBuffering(false);
+            }
+          });
+
+          call.on('close', () => {
+            if (!mountedRef.current) return;
+            setStatus('ended');
+            setErrorMsg('The broadcast has ended');
+            if (videoRef.current) videoRef.current.srcObject = null;
+            cleanupAudioAnalysis();
+          });
+
+          call.on('error', (err: any) => {
+            console.warn('[Viewer] Call error:', err);
+            setConnectionAttempts(prev => prev + 1);
+          });
+        };
+
+        setupDummyStream();
       });
 
       peer.on('error', (err: any) => {
@@ -293,7 +461,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       console.error('[Viewer] Failed to create peer:', err);
       isConnectingRef.current = false;
     }
-  }, [adminPeerId, destroyPeer, safePlay]);
+  }, [adminPeerId, destroyPeer, safePlay, volume, initAudioAnalysis, cleanupAudioAnalysis]);
 
   // Initialize connection
   useEffect(() => {
@@ -405,7 +573,6 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           ref={videoRef}
           className="w-full h-full object-contain bg-black"
           playsInline
-          autoPlay={false} // We'll control playback manually
           onClick={togglePlay}
           onDoubleClick={toggleFullscreen}
         />
@@ -430,10 +597,39 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           </div>
         )}
 
-        {/* Audio Status Indicator (for debugging) */}
+        {/* Audio Visualizer (when audio is present) */}
+        {hasVideo && hasAudio && (
+          <div className="absolute bottom-16 left-4 right-4 flex items-center justify-center gap-0.5 h-8 pointer-events-none">
+            {[...Array(20)].map((_, i) => {
+              const barHeight = Math.max(2, audioLevel * 24 * (Math.sin(i * 0.5) * 0.5 + 0.5));
+              return (
+                <div
+                  key={i}
+                  className="w-1 bg-red-500 rounded-full transition-all duration-75"
+                  style={{
+                    height: `${barHeight}px`,
+                    opacity: muted ? 0.3 : 0.8
+                  }}
+                />
+              );
+            })}
+          </div>
+        )}
+
+        {/* Audio Status Indicator */}
         {hasVideo && !hasAudio && (
           <div className="absolute top-3 left-3 px-2 py-1 bg-yellow-500/80 rounded-md text-xs text-white">
             No Audio
+          </div>
+        )}
+
+        {/* Audio Muted Indicator */}
+        {hasVideo && hasAudio && muted && (
+          <div className="absolute top-3 left-3 px-2 py-1 bg-gray-800/80 rounded-md text-xs text-white flex items-center gap-1">
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06A8.99 8.99 0 0017.73 19.73L19 21 20.27 19.73 5.54 5 4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
+            </svg>
+            Muted
           </div>
         )}
 
@@ -554,6 +750,17 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                   </div>
                 )}
               </div>
+
+              {/* Audio Level Indicator */}
+              {hasAudio && (
+                <div className="flex items-center gap-0.5 ml-1">
+                  <div className={`w-1 h-3 ${audioLevel > 0.1 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
+                  <div className={`w-1 h-4 ${audioLevel > 0.3 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
+                  <div className={`w-1 h-5 ${audioLevel > 0.5 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
+                  <div className={`w-1 h-4 ${audioLevel > 0.7 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
+                  <div className={`w-1 h-3 ${audioLevel > 0.9 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
+                </div>
+              )}
 
               {/* Time */}
               <div className="text-white text-sm font-mono ml-2">
