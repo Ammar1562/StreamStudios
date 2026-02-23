@@ -6,6 +6,13 @@ interface ViewerPageProps {
   streamId: string;
 }
 
+interface QualityLevel {
+  label: string;
+  height: number;
+  bitrate: number;
+  isHD?: boolean;
+}
+
 const PEER_PREFIX = 'ss-';
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -16,10 +23,22 @@ const ICE_SERVERS = [
   { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
+const QUALITY_LEVELS: QualityLevel[] = [
+  { label: 'Auto', height: 0, bitrate: 0 },
+  { label: '1080p', height: 1080, bitrate: 4500, isHD: true },
+  { label: '720p', height: 720, bitrate: 2500, isHD: true },
+  { label: '480p', height: 480, bitrate: 1200 },
+  { label: '360p', height: 360, bitrate: 800 },
+  { label: '240p', height: 240, bitrate: 400 },
+];
+
 const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
-  const [status, setStatus] = useState<'connecting' | 'live' | 'ended'>('connecting');
+  const [status, setStatus] = useState<'connecting' | 'live' | 'ended' | 'reconnecting'>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
   const [connectionAttempts, setConnectionAttempts] = useState(0);
+  const [networkQuality, setNetworkQuality] = useState<'good' | 'fair' | 'poor'>('good');
+  const [selectedQuality, setSelectedQuality] = useState<QualityLevel>(QUALITY_LEVELS[0]);
+  const [availableQualities, setAvailableQualities] = useState<QualityLevel[]>(QUALITY_LEVELS);
 
   // Player state
   const [playing, setPlaying] = useState(false);
@@ -27,182 +46,399 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [volume, setVolume] = useState(1);
   const [fullscreen, setFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [buffered, setBuffered] = useState(0);
   const [showVolume, setShowVolume] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [isLiveStream, setIsLiveStream] = useState(true);
   const [hasVideo, setHasVideo] = useState(false);
   const [hasAudio, setHasAudio] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
-  const [stats, setStats] = useState({ resolution: 'Loading...', bitrate: 0 });
-  const [playAttempted, setPlayAttempted] = useState(false);
+  const [stats, setStats] = useState({ 
+    resolution: 'Loading...', 
+    bitrate: 0,
+    fps: 0,
+    droppedFrames: 0 
+  });
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const peerRef = useRef<any>(null);
   const callRef = useRef<any>(null);
   const controlsTimer = useRef<number | null>(null);
   const retryTimer = useRef<number | null>(null);
-  const audioAnimationRef = useRef<number | null>(null);
-  const isConnectingRef = useRef(false);
+  const reconnectAttempts = useRef(0);
   const mountedRef = useRef(true);
-  const playPromiseRef = useRef<Promise<void> | null>(null);
+  const statsInterval = useRef<number | null>(null);
+  const qualityCheckInterval = useRef<number | null>(null);
+  const lastBitrateCheck = useRef({ time: Date.now(), bytes: 0 });
 
   const adminPeerId = `${PEER_PREFIX}${streamId}`;
 
-  const formatTime = (seconds: number) => {
-    if (!isFinite(seconds) || seconds < 0) return '0:00';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    return h > 0 
-      ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-      : `${m}:${s.toString().padStart(2, '0')}`;
-  };
+  // Network quality detection
+  const checkNetworkQuality = useCallback(() => {
+    if (!videoRef.current || !mountedRef.current) return;
 
-  const formatBitrate = (bps: number) => {
-    if (bps < 1000) return `${bps} bps`;
-    if (bps < 1000000) return `${(bps / 1000).toFixed(1)} Kbps`;
-    return `${(bps / 1000000).toFixed(1)} Mbps`;
-  };
-
-  // Initialize audio context for visualization
-  const initAudioAnalysis = useCallback((stream: MediaStream) => {
-    try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-
-      const audioContext = audioContextRef.current;
-      
-      // Resume audio context if it's suspended (browser autoplay policies)
-      if (audioContext.state === 'suspended') {
-        audioContext.resume();
-      }
-
-      // Create analyser
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      analyserRef.current = analyser;
-
-      // Create source from audio tracks
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length > 0) {
-        // Create a new MediaStream with only audio tracks
-        const audioStream = new MediaStream(audioTracks);
-        sourceRef.current = audioContext.createMediaStreamSource(audioStream);
-        sourceRef.current.connect(analyser);
-        
-        // Start monitoring audio levels
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        
-        const updateAudioLevel = () => {
-          if (!analyserRef.current || !mountedRef.current) return;
-          
-          analyserRef.current.getByteFrequencyData(dataArray);
-          
-          // Calculate average volume level (0-255)
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
-          }
-          const avg = sum / dataArray.length;
-          // Convert to 0-1 range with some sensitivity
-          const level = Math.min(1, avg / 128);
-          setAudioLevel(level);
-          
-          audioAnimationRef.current = requestAnimationFrame(updateAudioLevel);
-        };
-        
-        updateAudioLevel();
-      }
-    } catch (err) {
-      console.warn('[Viewer] Audio analysis not supported:', err);
-    }
-  }, []);
-
-  // Clean up audio analysis
-  const cleanupAudioAnalysis = useCallback(() => {
-    if (audioAnimationRef.current) {
-      cancelAnimationFrame(audioAnimationRef.current);
-      audioAnimationRef.current = null;
-    }
-    
-    if (sourceRef.current) {
-      try {
-        sourceRef.current.disconnect();
-      } catch {}
-      sourceRef.current = null;
-    }
-    
-    if (audioContextRef.current) {
-      try {
-        audioContextRef.current.close();
-      } catch {}
-      audioContextRef.current = null;
-    }
-    
-    analyserRef.current = null;
-    setAudioLevel(0);
-  }, []);
-
-  const safePlay = useCallback(async () => {
     const video = videoRef.current;
-    if (!video) return false;
+    const now = Date.now();
     
+    // Check buffering state
+    if (video.buffered.length > 0) {
+      const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+      const currentTime = video.currentTime;
+      const bufferedAhead = bufferedEnd - currentTime;
+      
+      if (bufferedAhead < 2) {
+        setNetworkQuality('poor');
+      } else if (bufferedAhead < 5) {
+        setNetworkQuality('fair');
+      } else {
+        setNetworkQuality('good');
+      }
+    }
+
+    // Adjust quality based on network
+    if (selectedQuality.label === 'Auto' && hasVideo) {
+      const currentQuality = availableQualities.find(q => 
+        q.height === parseInt(stats.resolution.split('x')[1])
+      ) || availableQualities[3];
+
+      if (networkQuality === 'poor' && currentQuality.height > 480) {
+        // Switch to lower quality
+        const lowerQuality = availableQualities.find(q => q.height === 480) || availableQualities[4];
+        applyQuality(lowerQuality);
+      } else if (networkQuality === 'fair' && currentQuality.height < 480) {
+        // Switch to medium quality
+        const mediumQuality = availableQualities.find(q => q.height === 720) || availableQualities[2];
+        applyQuality(mediumQuality);
+      } else if (networkQuality === 'good' && currentQuality.height < 720) {
+        // Switch to higher quality
+        const highQuality = availableQualities.find(q => q.height === 1080) || availableQualities[1];
+        applyQuality(highQuality);
+      }
+    }
+  }, [networkQuality, selectedQuality.label, availableQualities, stats.resolution, hasVideo]);
+
+  const applyQuality = useCallback((quality: QualityLevel) => {
+    if (!videoRef.current || !callRef.current) return;
+
     try {
-      // Cancel any existing play promise
-      if (playPromiseRef.current) {
-        try {
-          await playPromiseRef.current;
-        } catch {
-          // Ignore errors from previous play
+      // For WebRTC, we can't directly change resolution, but we can:
+      // 1. Signal the broadcaster to change quality (implement if broadcaster supports it)
+      // 2. Adjust video element size
+      if (quality.height > 0) {
+        const video = videoRef.current;
+        video.style.maxWidth = `${quality.height * (16/9)}px`;
+        video.style.maxHeight = `${quality.height}px`;
+      }
+      
+      setSelectedQuality(quality);
+    } catch (err) {
+      console.warn('[Viewer] Failed to apply quality:', err);
+    }
+  }, []);
+
+  // Monitor stream stats
+  const updateStats = useCallback(() => {
+    if (!videoRef.current || !callRef.current || !mountedRef.current) return;
+
+    const video = videoRef.current;
+    const now = Date.now();
+
+    // Get video track stats if available
+    if (video.srcObject) {
+      const videoTracks = (video.srcObject as MediaStream).getVideoTracks();
+      if (videoTracks.length > 0) {
+        const settings = videoTracks[0].getSettings();
+        
+        // Calculate bitrate (simplified)
+        const bytesPerSecond = (video.videoWidth * video.videoHeight * 30 * 0.1) / 1000; // Rough estimate
+        const deltaTime = (now - lastBitrateCheck.current.time) / 1000;
+        
+        if (deltaTime > 1) {
+          const bitrate = bytesPerSecond * 8; // Convert to bits
+          setStats(prev => ({
+            ...prev,
+            resolution: settings.width && settings.height 
+              ? `${settings.width}x${settings.height}`
+              : 'Unknown',
+            bitrate: Math.round(bitrate),
+            fps: settings.frameRate || 30
+          }));
+          
+          lastBitrateCheck.current = { time: now, bytes: bytesPerSecond };
         }
       }
-      
-      // Ensure video is not muted by default
-      video.muted = false;
-      video.volume = volume;
-      
-      if (video.paused) {
-        console.log('[Viewer] Attempting to play');
-        const playPromise = video.play();
-        playPromiseRef.current = playPromise;
-        
-        await playPromise;
-        console.log('[Viewer] Play successful');
-        setPlaying(true);
-        setPlayAttempted(true);
-        return true;
-      }
-      return true;
-    } catch (e) {
-      console.warn('[Viewer] Play failed:', e);
-      setPlaying(false);
-      return false;
-    } finally {
-      playPromiseRef.current = null;
     }
-  }, [volume]);
 
-  const togglePlay = useCallback(async () => {
+    // Check for dropped frames (if supported)
+    if ('webkitDroppedFrameCount' in video) {
+      setStats(prev => ({
+        ...prev,
+        droppedFrames: (video as any).webkitDroppedFrameCount || 0
+      }));
+    }
+  }, []);
+
+  // Clean up connection
+  const cleanup = useCallback(() => {
+    if (statsInterval.current) {
+      clearInterval(statsInterval.current);
+      statsInterval.current = null;
+    }
+    
+    if (qualityCheckInterval.current) {
+      clearInterval(qualityCheckInterval.current);
+      qualityCheckInterval.current = null;
+    }
+    
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+
+    if (callRef.current) {
+      try { 
+        callRef.current.close(); 
+      } catch {}
+      callRef.current = null;
+    }
+    
+    if (peerRef.current) {
+      try { 
+        peerRef.current.destroy(); 
+      } catch {}
+      peerRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setHasVideo(false);
+    setHasAudio(false);
+  }, []);
+
+  // Connect to broadcaster
+  const connectToBroadcaster = useCallback(async () => {
+    if (!mountedRef.current) return;
+
+    cleanup();
+    setStatus('connecting');
+    setErrorMsg('');
+
+    // Generate unique viewer ID
+    const viewerId = `viewer-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+    try {
+      const peer = new Peer(viewerId, { 
+        config: { iceServers: ICE_SERVERS },
+        debug: 0 // Disable debug logs in production
+      });
+      
+      peerRef.current = peer;
+
+      peer.on('open', () => {
+        if (!mountedRef.current) return;
+        console.log('[Viewer] Connected to signaling server');
+        reconnectAttempts.current = 0;
+
+        // Call the broadcaster without dummy stream
+        const call = peer.call(adminPeerId, new MediaStream());
+        callRef.current = call;
+
+        call.on('stream', (remoteStream: MediaStream) => {
+          if (!mountedRef.current) return;
+          
+          console.log('[Viewer] Received stream');
+          const videoTracks = remoteStream.getVideoTracks();
+          const audioTracks = remoteStream.getAudioTracks();
+          
+          setHasVideo(videoTracks.length > 0);
+          setHasAudio(audioTracks.length > 0);
+          
+          if (videoRef.current) {
+            videoRef.current.srcObject = remoteStream;
+            
+            // Start playing automatically
+            videoRef.current.play().catch(err => {
+              console.warn('[Viewer] Autoplay failed:', err);
+              setPlaying(false);
+            });
+          }
+
+          setStatus('live');
+          setIsBuffering(false);
+
+          // Start stats monitoring
+          if (!statsInterval.current) {
+            statsInterval.current = window.setInterval(updateStats, 2000);
+          }
+          
+          if (!qualityCheckInterval.current) {
+            qualityCheckInterval.current = window.setInterval(checkNetworkQuality, 3000);
+          }
+        });
+
+        call.on('close', () => {
+          if (!mountedRef.current) return;
+          console.log('[Viewer] Call closed');
+          
+          if (status === 'live') {
+            setStatus('reconnecting');
+            // Attempt to reconnect
+            if (reconnectAttempts.current < 3) {
+              reconnectAttempts.current++;
+              retryTimer.current = window.setTimeout(connectToBroadcaster, 2000);
+            } else {
+              setStatus('ended');
+              setErrorMsg('Broadcast ended');
+            }
+          }
+        });
+
+        call.on('error', (err: any) => {
+          console.warn('[Viewer] Call error:', err);
+          
+          if (!mountedRef.current) return;
+          
+          if (reconnectAttempts.current < 3) {
+            reconnectAttempts.current++;
+            setStatus('reconnecting');
+            retryTimer.current = window.setTimeout(connectToBroadcaster, 2000 * reconnectAttempts.current);
+          } else {
+            setStatus('ended');
+            setErrorMsg('Connection failed');
+          }
+        });
+      });
+
+      peer.on('error', (err: any) => {
+        console.warn('[Viewer] Peer error:', err.type);
+        
+        if (!mountedRef.current) return;
+
+        if (err.type === 'peer-unavailable') {
+          // Broadcaster not live
+          if (reconnectAttempts.current < 5) {
+            reconnectAttempts.current++;
+            setStatus('reconnecting');
+            retryTimer.current = window.setTimeout(connectToBroadcaster, 3000);
+          } else {
+            setStatus('ended');
+            setErrorMsg('Broadcaster is offline');
+          }
+        } else if (err.type === 'network' || err.type === 'server-error') {
+          // Network issues - retry with backoff
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000);
+          reconnectAttempts.current++;
+          setStatus('reconnecting');
+          retryTimer.current = window.setTimeout(connectToBroadcaster, delay);
+        }
+      });
+
+      peer.on('disconnected', () => {
+        console.log('[Viewer] Disconnected from signaling');
+        
+        if (!mountedRef.current) return;
+        
+        if (reconnectAttempts.current < 3) {
+          reconnectAttempts.current++;
+          setStatus('reconnecting');
+          retryTimer.current = window.setTimeout(connectToBroadcaster, 3000);
+        }
+      });
+
+    } catch (err) {
+      console.error('[Viewer] Failed to create peer:', err);
+      
+      if (mountedRef.current) {
+        setStatus('ended');
+        setErrorMsg('Failed to initialize connection');
+      }
+    }
+  }, [adminPeerId, cleanup, updateStats, checkNetworkQuality, status]);
+
+  // Initialize connection
+  useEffect(() => {
+    mountedRef.current = true;
+    reconnectAttempts.current = 0;
+    
+    connectToBroadcaster();
+
+    const onFullscreenChange = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+
+    return () => {
+      mountedRef.current = false;
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      
+      if (controlsTimer.current) clearTimeout(controlsTimer.current);
+      cleanup();
+    };
+  }, [connectToBroadcaster, cleanup]);
+
+  // Video event listeners
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    const onVolumeChange = () => {
+      setMuted(video.muted);
+      setVolume(video.volume);
+    };
+    const onWaiting = () => setIsBuffering(true);
+    const onPlaying = () => {
+      setIsBuffering(false);
+      setStatus('live');
+    };
+    const onError = (e: Event) => {
+      console.error('[Viewer] Video error:', e);
+      
+      if (status === 'live') {
+        setStatus('reconnecting');
+        if (reconnectAttempts.current < 3) {
+          reconnectAttempts.current++;
+          retryTimer.current = window.setTimeout(connectToBroadcaster, 2000);
+        }
+      }
+    };
+    const onStalled = () => {
+      if (status === 'live') {
+        setIsBuffering(true);
+      }
+    };
+
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    video.addEventListener('volumechange', onVolumeChange);
+    video.addEventListener('waiting', onWaiting);
+    video.addEventListener('playing', onPlaying);
+    video.addEventListener('error', onError);
+    video.addEventListener('stalled', onStalled);
+
+    return () => {
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('volumechange', onVolumeChange);
+      video.removeEventListener('waiting', onWaiting);
+      video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('error', onError);
+      video.removeEventListener('stalled', onStalled);
+    };
+  }, [connectToBroadcaster, status]);
+
+  const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
     
     if (video.paused) {
-      await safePlay();
+      video.play().catch(() => {});
     } else {
       video.pause();
-      setPlaying(false);
     }
-  }, [safePlay]);
+  }, []);
 
   const toggleMute = useCallback(() => {
     if (videoRef.current) {
@@ -227,12 +463,6 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       setShowSettings(false);
     }
   }, []);
-
-  const seek = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    if (videoRef.current && !isLiveStream) {
-      videoRef.current.currentTime = parseFloat(e.target.value);
-    }
-  }, [isLiveStream]);
 
   const toggleFullscreen = useCallback(async () => {
     if (!containerRef.current) return;
@@ -260,294 +490,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     }, 3000);
   }, [playing]);
 
-  // Destroy peer connection
-  const destroyPeer = useCallback(() => {
-    cleanupAudioAnalysis();
-    
-    if (retryTimer.current) {
-      clearTimeout(retryTimer.current);
-      retryTimer.current = null;
-    }
-    if (callRef.current) {
-      try { callRef.current.close(); } catch {}
-      callRef.current = null;
-    }
-    if (peerRef.current) {
-      try { peerRef.current.destroy(); } catch {}
-      peerRef.current = null;
-    }
-    isConnectingRef.current = false;
-  }, [cleanupAudioAnalysis]);
-
-  // Connect to broadcaster
-  const connectToBroadcaster = useCallback(() => {
-    if (!mountedRef.current || isConnectingRef.current) return;
-    isConnectingRef.current = true;
-    
-    destroyPeer();
-
-    const viewerId = `v-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
-    
-    try {
-      const peer = new Peer(viewerId, { config: { iceServers: ICE_SERVERS } });
-      peerRef.current = peer;
-
-      peer.on('open', () => {
-        console.log('[Viewer] Connected to signaling');
-        isConnectingRef.current = false;
-        
-        // Create a proper audio+video dummy stream for the call
-        const setupDummyStream = async () => {
-          try {
-            // Create canvas for video
-            const canvas = document.createElement('canvas');
-            canvas.width = 2;
-            canvas.height = 2;
-            const canvasStream = canvas.captureStream(1);
-            
-            // Try to get a dummy audio context
-            let audioTracks: MediaStreamTrack[] = [];
-            try {
-              const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-              const oscillator = audioContext.createOscillator();
-              const dst = oscillator.connect(audioContext.createMediaStreamDestination());
-              oscillator.start();
-              audioTracks = dst.stream.getAudioTracks();
-              
-              // Stop oscillator after a short time
-              setTimeout(() => {
-                oscillator.stop();
-                audioContext.close();
-              }, 500);
-            } catch (err) {
-              console.warn('[Viewer] Could not create audio track:', err);
-            }
-            
-            // Combine tracks
-            const tracks = [
-              ...audioTracks,
-              ...canvasStream.getVideoTracks()
-            ];
-            
-            const dummyStream = new MediaStream(tracks);
-            
-            // Make the call with the combined stream
-            const call = peer.call(adminPeerId, dummyStream);
-            callRef.current = call;
-
-            setupCallHandlers(call);
-          } catch (err) {
-            console.warn('[Viewer] Error setting up dummy stream:', err);
-            // Fallback to video-only
-            const canvas = document.createElement('canvas');
-            canvas.width = 2;
-            canvas.height = 2;
-            const dummyStream = canvas.captureStream(1);
-            const call = peer.call(adminPeerId, dummyStream);
-            callRef.current = call;
-            setupCallHandlers(call);
-          }
-        };
-
-        const setupCallHandlers = (call: any) => {
-          call.on('stream', (remoteStream: MediaStream) => {
-            if (!mountedRef.current) return;
-            
-            console.log('[Viewer] Received stream');
-            console.log('[Viewer] Stream tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
-            
-            const video = videoRef.current;
-            if (video) {
-              // Check for audio tracks
-              const audioTracks = remoteStream.getAudioTracks();
-              const videoTracks = remoteStream.getVideoTracks();
-              
-              setHasAudio(audioTracks.length > 0);
-              setHasVideo(videoTracks.length > 0);
-              
-              if (audioTracks.length > 0) {
-                console.log('[Viewer] Audio tracks found:', audioTracks.length);
-                
-                // Ensure audio tracks are enabled
-                audioTracks.forEach(track => {
-                  track.enabled = true;
-                  console.log(`[Viewer] Audio track ${track.id} enabled: ${track.enabled}`);
-                });
-                
-                // Initialize audio analysis
-                initAudioAnalysis(remoteStream);
-              } else {
-                console.warn('[Viewer] No audio tracks in stream');
-              }
-              
-              // Set the stream to video element
-              video.srcObject = remoteStream;
-              
-              // Explicitly set audio properties
-              video.muted = false;
-              video.volume = volume;
-              
-              // Try to play - but don't pause/replay unnecessarily
-              setPlayAttempted(false);
-              
-              // Small delay to ensure stream is attached
-              setTimeout(() => {
-                if (mountedRef.current && video && !playAttempted) {
-                  safePlay().catch(() => {
-                    // Autoplay prevented, user will need to click play
-                    setPlaying(false);
-                  });
-                }
-              }, 500);
-
-              // Update stream info
-              if (videoTracks.length > 0) {
-                const settings = videoTracks[0].getSettings();
-                setStats({
-                  resolution: settings.width && settings.height 
-                    ? `${settings.width}x${settings.height}`
-                    : 'Unknown',
-                  bitrate: 0
-                });
-              }
-              
-              setStatus('live');
-              setIsBuffering(false);
-            }
-          });
-
-          call.on('close', () => {
-            if (!mountedRef.current) return;
-            setStatus('ended');
-            setErrorMsg('The broadcast has ended');
-            if (videoRef.current) videoRef.current.srcObject = null;
-            cleanupAudioAnalysis();
-          });
-
-          call.on('error', (err: any) => {
-            console.warn('[Viewer] Call error:', err);
-            setConnectionAttempts(prev => prev + 1);
-          });
-        };
-
-        setupDummyStream();
-      });
-
-      peer.on('error', (err: any) => {
-        console.log('[Viewer] Peer error:', err.type);
-        if (!mountedRef.current) return;
-        isConnectingRef.current = false;
-
-        if (err.type === 'peer-unavailable') {
-          // Admin not live, retry
-          setConnectionAttempts(prev => prev + 1);
-          if (retryTimer.current) clearTimeout(retryTimer.current);
-          retryTimer.current = window.setTimeout(() => {
-            if (mountedRef.current) connectToBroadcaster();
-          }, 3000);
-        } else if (err.type === 'unavailable-id' || err.type === 'network' || err.type === 'server-error') {
-          // Retry with new connection
-          if (retryTimer.current) clearTimeout(retryTimer.current);
-          retryTimer.current = window.setTimeout(() => {
-            if (mountedRef.current) connectToBroadcaster();
-          }, 2000);
-        }
-      });
-
-      peer.on('disconnected', () => {
-        console.log('[Viewer] Disconnected from signaling');
-        if (!mountedRef.current) return;
-        
-        if (retryTimer.current) clearTimeout(retryTimer.current);
-        retryTimer.current = window.setTimeout(() => {
-          if (mountedRef.current) connectToBroadcaster();
-        }, 3000);
-      });
-
-    } catch (err) {
-      console.error('[Viewer] Failed to create peer:', err);
-      isConnectingRef.current = false;
-    }
-  }, [adminPeerId, destroyPeer, safePlay, volume, initAudioAnalysis, cleanupAudioAnalysis, playAttempted]);
-
-  // Initialize connection
-  useEffect(() => {
-    mountedRef.current = true;
-    connectToBroadcaster();
-    resetControls();
-
-    const onFullscreenChange = () => setFullscreen(!!document.fullscreenElement);
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-
-    return () => {
-      mountedRef.current = false;
-      document.removeEventListener('fullscreenchange', onFullscreenChange);
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
-      destroyPeer();
-    };
-  }, [connectToBroadcaster, resetControls, destroyPeer]);
-
-  // Video event listeners
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const onTimeUpdate = () => setCurrentTime(video.currentTime);
-    const onLoadedMetadata = () => {
-      const dur = video.duration || 0;
-      setDuration(dur);
-      setIsLiveStream(!isFinite(dur) || dur > 86400);
-    };
-    const onPlay = () => {
-      console.log('[Viewer] Video playing');
-      setPlaying(true);
-    };
-    const onPause = () => {
-      console.log('[Viewer] Video paused');
-      setPlaying(false);
-    };
-    const onVolumeChange = () => {
-      setMuted(video.muted);
-      setVolume(video.volume);
-    };
-    const onProgress = () => {
-      if (video.buffered.length > 0) {
-        setBuffered(video.buffered.end(video.buffered.length - 1));
-      }
-    };
-    const onWaiting = () => setIsBuffering(true);
-    const onPlaying = () => {
-      console.log('[Viewer] Video playing event');
-      setIsBuffering(false);
-    };
-    const onError = (e: Event) => {
-      console.error('[Viewer] Video error:', e);
-    };
-
-    video.addEventListener('timeupdate', onTimeUpdate);
-    video.addEventListener('loadedmetadata', onLoadedMetadata);
-    video.addEventListener('play', onPlay);
-    video.addEventListener('pause', onPause);
-    video.addEventListener('volumechange', onVolumeChange);
-    video.addEventListener('progress', onProgress);
-    video.addEventListener('waiting', onWaiting);
-    video.addEventListener('playing', onPlaying);
-    video.addEventListener('error', onError);
-
-    return () => {
-      video.removeEventListener('timeupdate', onTimeUpdate);
-      video.removeEventListener('loadedmetadata', onLoadedMetadata);
-      video.removeEventListener('play', onPlay);
-      video.removeEventListener('pause', onPause);
-      video.removeEventListener('volumechange', onVolumeChange);
-      video.removeEventListener('progress', onProgress);
-      video.removeEventListener('waiting', onWaiting);
-      video.removeEventListener('playing', onPlaying);
-      video.removeEventListener('error', onError);
-    };
-  }, []);
-
-  // Handle ended state
+  // Render status screens
   if (status === 'ended') {
     return (
       <div className="min-h-screen bg-white flex items-center justify-center p-6">
@@ -558,19 +501,21 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             </svg>
           </div>
           <div>
-            <h2 className="text-2xl font-bold text-gray-900">No Live Stream</h2>
-            <p className="text-gray-500 mt-2">
-              This stream has ended or doesn't exist. Each broadcast has a unique link.
-            </p>
+            <h2 className="text-2xl font-bold text-gray-900">Stream Ended</h2>
+            <p className="text-gray-500 mt-2">{errorMsg || 'The broadcast has ended'}</p>
           </div>
+          <button
+            onClick={() => window.location.hash = '#/'}
+            className="px-6 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors"
+          >
+            Go Home
+          </button>
         </div>
       </div>
     );
   }
 
   const volumePercent = (muted ? 0 : volume) * 100;
-  const seekPercent = duration ? (currentTime / duration) * 100 : 0;
-  const bufferedPercent = duration ? (buffered / duration) * 100 : 0;
 
   return (
     <div className="min-h-screen bg-white">
@@ -598,71 +543,53 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           onDoubleClick={toggleFullscreen}
         />
 
-        {/* Connecting Overlay */}
-        {status === 'connecting' && !hasVideo && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+        {/* Connection Status Overlays */}
+        {(status === 'connecting' || status === 'reconnecting') && (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/90">
             <div className="text-center">
               <div className="w-12 h-12 border-3 border-gray-600 border-t-white rounded-full spin mx-auto mb-4" />
-              <p className="text-white/90 text-sm font-medium">Connecting to stream...</p>
-              <p className="text-white/50 text-xs mt-2 font-mono">{streamId.slice(0, 12)}…</p>
+              <p className="text-white/90 text-sm font-medium">
+                {status === 'connecting' ? 'Connecting to stream...' : 'Reconnecting...'}
+              </p>
+              <p className="text-white/50 text-xs mt-2">
+                {status === 'reconnecting' && `Attempt ${reconnectAttempts.current}/3`}
+              </p>
               
               {connectionAttempts > 2 && (
                 <button
                   onClick={connectToBroadcaster}
                   className="mt-4 px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white text-sm transition-colors"
                 >
-                  Retry Connection
+                  Retry Now
                 </button>
               )}
             </div>
           </div>
         )}
 
-        {/* Audio Visualizer (when audio is present) */}
-        {hasVideo && hasAudio && playing && (
-          <div className="absolute bottom-16 left-4 right-4 flex items-center justify-center gap-0.5 h-8 pointer-events-none">
-            {[...Array(20)].map((_, i) => {
-              const barHeight = Math.max(2, audioLevel * 24 * (Math.sin(i * 0.5) * 0.5 + 0.5));
-              return (
-                <div
-                  key={i}
-                  className="w-1 bg-red-500 rounded-full transition-all duration-75"
-                  style={{
-                    height: `${barHeight}px`,
-                    opacity: muted ? 0.3 : 0.8
-                  }}
-                />
-              );
-            })}
+        {/* Network Quality Indicator */}
+        {status === 'live' && networkQuality !== 'good' && (
+          <div className="absolute top-3 right-3 px-2 py-1 bg-yellow-500/80 rounded-md text-xs text-white">
+            {networkQuality === 'poor' ? 'Poor Network' : 'Fair Network'}
           </div>
         )}
 
-        {/* Audio Status Indicator */}
+        {/* Audio Status */}
         {hasVideo && !hasAudio && (
           <div className="absolute top-3 left-3 px-2 py-1 bg-yellow-500/80 rounded-md text-xs text-white">
             No Audio
           </div>
         )}
 
-        {/* Audio Muted Indicator */}
-        {hasVideo && hasAudio && muted && (
-          <div className="absolute top-3 left-3 px-2 py-1 bg-gray-800/80 rounded-md text-xs text-white flex items-center gap-1">
-            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06A8.99 8.99 0 0017.73 19.73L19 21 20.27 19.73 5.54 5 4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
-            </svg>
-            Muted
-          </div>
-        )}
-
         {/* Buffering Spinner */}
-        {isBuffering && hasVideo && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        {isBuffering && status === 'live' && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-black/20">
             <div className="w-10 h-10 border-2 border-white/20 border-t-white rounded-full spin" />
           </div>
         )}
 
         {/* Play Overlay (when paused) */}
-        {hasVideo && !playing && !isBuffering && (
+        {hasVideo && !playing && !isBuffering && status === 'live' && (
           <div
             className="absolute inset-0 flex items-center justify-center cursor-pointer bg-black/20"
             onClick={togglePlay}
@@ -681,35 +608,28 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             showControls || !playing ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
         >
+          {/* Top Controls - Stats */}
+          <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {status === 'live' && (
+                <span className="flex items-center gap-1.5 px-2 py-1 bg-red-500 rounded-md">
+                  <span className="w-1.5 h-1.5 bg-white rounded-full live-dot" />
+                  <span className="text-white text-xs font-medium">LIVE</span>
+                </span>
+              )}
+              <span className="px-2 py-1 bg-black/50 backdrop-blur-sm rounded-md text-xs text-white">
+                {stats.resolution}
+              </span>
+              {stats.bitrate > 0 && (
+                <span className="px-2 py-1 bg-black/50 backdrop-blur-sm rounded-md text-xs text-white">
+                  {Math.round(stats.bitrate / 1000)} Kbps
+                </span>
+              )}
+            </div>
+          </div>
 
           {/* Bottom Controls */}
           <div className="absolute bottom-0 left-0 right-0 p-4 space-y-2">
-            {/* Progress Bar */}
-            <div className="relative group">
-              <div className="relative h-1 bg-white/30 rounded-full overflow-hidden">
-                <div
-                  className="absolute h-full bg-white/50 rounded-full"
-                  style={{ width: `${bufferedPercent}%` }}
-                />
-                <div
-                  className="absolute h-full bg-red-600 rounded-full"
-                  style={{ width: isLiveStream ? '100%' : `${seekPercent}%` }}
-                />
-              </div>
-              
-              {!isLiveStream && duration > 0 && (
-                <input
-                  type="range"
-                  min={0}
-                  max={duration}
-                  step={0.1}
-                  value={currentTime}
-                  onChange={seek}
-                  className="seek-bar absolute inset-0 w-full h-4 -top-1.5 opacity-0 group-hover:opacity-100 cursor-pointer"
-                />
-              )}
-            </div>
-
             {/* Control Buttons */}
             <div className="flex items-center gap-2">
               {/* Play/Pause */}
@@ -783,17 +703,6 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                 </div>
               )}
 
-              {/* Time */}
-              <div className="text-white text-sm font-mono ml-2">
-                {isLiveStream ? (
-                  <span className="text-red-500 font-medium">LIVE</span>
-                ) : (
-                  <span>
-                    {formatTime(currentTime)} / {formatTime(duration)}
-                  </span>
-                )}
-              </div>
-
               <div className="flex-1" />
 
               {/* Settings */}
@@ -808,19 +717,49 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                 </button>
 
                 {showSettings && (
-                  <div className="absolute bottom-full right-0 mb-2 w-40 bg-white rounded-lg shadow-xl border border-gray-200 py-2">
-                    <div className="px-3 py-1.5 text-xs font-medium text-gray-500">Playback Speed</div>
-                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => (
-                      <button
-                        key={rate}
-                        onClick={() => changePlaybackRate(rate)}
-                        className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors ${
-                          playbackRate === rate ? 'text-red-600 font-medium' : 'text-gray-700'
-                        }`}
-                      >
-                        {rate === 1 ? 'Normal' : `${rate}x`}
-                      </button>
-                    ))}
+                  <div className="absolute bottom-full right-0 mb-2 w-56 bg-white rounded-lg shadow-xl border border-gray-200 py-2">
+                    <div className="px-3 py-1.5 text-xs font-medium text-gray-500 border-b border-gray-100">
+                      Playback Speed
+                    </div>
+                    <div className="grid grid-cols-3 gap-1 p-2">
+                      {[0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => (
+                        <button
+                          key={rate}
+                          onClick={() => changePlaybackRate(rate)}
+                          className={`px-2 py-1 text-xs rounded transition-colors ${
+                            playbackRate === rate 
+                              ? 'bg-red-500 text-white' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          }`}
+                        >
+                          {rate === 1 ? 'Normal' : `${rate}x`}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="px-3 py-1.5 text-xs font-medium text-gray-500 border-t border-gray-100 mt-1">
+                      Video Quality
+                    </div>
+                    <div className="p-2 space-y-1">
+                      {QUALITY_LEVELS.map(quality => (
+                        <button
+                          key={quality.label}
+                          onClick={() => applyQuality(quality)}
+                          className={`w-full text-left px-2 py-1.5 text-sm rounded transition-colors ${
+                            selectedQuality.label === quality.label 
+                              ? 'bg-red-500 text-white' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          }`}
+                        >
+                          <span className="flex items-center justify-between">
+                            <span>{quality.label}</span>
+                            {quality.isHD && (
+                              <span className="text-xs bg-yellow-500 text-white px-1 rounded">HD</span>
+                            )}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
