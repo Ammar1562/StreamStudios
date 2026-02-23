@@ -4,107 +4,99 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>StreamStudio – Live Broadcasting</title>
-
-  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- PeerJS -->
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
 
   <style>
-    /* ── Fonts ────────────────────────────────────────────────────────────── */
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
 
-    /* ── Animations ───────────────────────────────────────────────────────── */
-    @keyframes live-pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
-    }
+    @keyframes live-pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
     .live-dot { animation: live-pulse 1.4s ease-in-out infinite; }
 
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-    .spin { animation: spin 0.9s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 0.85s linear infinite; }
 
-    @keyframes fade-in {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .fade-in { animation: fade-in 0.4s ease both; }
+    @keyframes fade-in { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+    .fade-in { animation: fade-in 0.35s ease both; }
 
-    @keyframes slide-up {
-      from { opacity: 0; transform: translateY(20px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .slide-up { animation: slide-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    @keyframes slide-up { from{opacity:0;transform:translateY(24px)} to{opacity:1;transform:translateY(0)} }
+    .slide-up { animation: slide-up 0.5s cubic-bezier(0.16,1,0.3,1) both; }
 
-    @keyframes scale-in {
-      from { opacity: 0; transform: scale(0.95); }
-      to { opacity: 1; transform: scale(1); }
-    }
-    .scale-in { animation: scale-in 0.25s ease both; }
+    @keyframes scale-in { from{opacity:0;transform:scale(0.92)} to{opacity:1;transform:scale(1)} }
+    .scale-in { animation: scale-in 0.2s cubic-bezier(0.16,1,0.3,1) both; }
 
-    /* ── Custom Scrollbar ─────────────────────────────────────────────────── */
+    /* Scrollbar */
     .custom-scrollbar::-webkit-scrollbar { width: 4px; }
     .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-    .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
-    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+    * { scrollbar-width: thin; scrollbar-color: #2a2a2a transparent; }
 
-    /* ── Volume Slider ────────────────────────────────────────────────────── */
-    input[type="range"].volume-slider {
-      -webkit-appearance: none;
-      appearance: none;
-      height: 4px;
-      border-radius: 2px;
-      outline: none;
-      cursor: pointer;
-    }
-    input[type="range"].volume-slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background: white;
-      cursor: pointer;
-      box-shadow: 0 0 0 2px rgba(255,255,255,0.2);
-      transition: transform 0.1s;
-    }
-    input[type="range"].volume-slider::-webkit-slider-thumb:hover {
-      transform: scale(1.2);
-    }
+    /* Volume slider */
+    input[type="range"].volume-slider { -webkit-appearance:none; appearance:none; height:4px; border-radius:2px; outline:none; cursor:pointer; }
+    input[type="range"].volume-slider::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:white; cursor:pointer; transition:transform 0.1s; }
+    input[type="range"].volume-slider:hover::-webkit-slider-thumb { transform:scale(1.25); }
 
-    /* ── Select styling ───────────────────────────────────────────────────── */
-    select option { background: #1a1a1a; color: white; }
+    /* Select option colors */
+    select option { background:#1a1a1a; color:white; }
 
-    /* ── Global ───────────────────────────────────────────────────────────── */
-    * {
-      scrollbar-width: thin;
-      scrollbar-color: #333 transparent;
-    }
+    /* Hide native video controls */
+    video::-webkit-media-controls { display:none !important; }
+    video { outline:none; }
+
+    /* Body */
     body {
-      font-family: 'DM Sans', system-ui, sans-serif;
+      font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+      background: #0f0f0f;
+      color: white;
       user-select: none;
       -webkit-user-select: none;
       -webkit-tap-highlight-color: transparent;
-      background: #0f0f0f;
-      color: white;
-    }
-    :root {
-      --red: #ff0033;
-      --red-dark: #cc0025;
+      overflow-x: hidden;
     }
     html { scroll-behavior: smooth; }
 
-    /* ── Video no controls ─────────────────────────────────────────────────── */
-    video::-webkit-media-controls { display: none !important; }
-    video { outline: none; }
-
-    /* ── Border 3 (not in default tailwind) ─────────────────────────────── */
-    .border-3 { border-width: 3px; }
+    /* Utility not in Tailwind CDN */
+    .bg-white\/3 { background-color: rgba(255,255,255,0.03); }
+    .bg-white\/8 { background-color: rgba(255,255,255,0.08); }
+    .bg-white\/12 { background-color: rgba(255,255,255,0.12); }
+    .border-white\/8 { border-color: rgba(255,255,255,0.08); }
+    .border-white\/3 { border-color: rgba(255,255,255,0.03); }
+    .text-white\/35 { color: rgba(255,255,255,0.35); }
+    .text-white\/15 { color: rgba(255,255,255,0.15); }
+    .text-white\/25 { color: rgba(255,255,255,0.25); }
+    .hover\:bg-white\/8:hover { background-color: rgba(255,255,255,0.08); }
+    .hover\:bg-white\/12:hover { background-color: rgba(255,255,255,0.12); }
+    .hover\:bg-white\/15:hover { background-color: rgba(255,255,255,0.15); }
+    .bg-blue-500\/10 { background-color: rgba(59,130,246,0.1); }
+    .bg-green-500\/10 { background-color: rgba(34,197,94,0.1); }
+    .bg-purple-500\/10 { background-color: rgba(168,85,247,0.1); }
+    .bg-red-600\/15 { background-color: rgba(220,38,38,0.15); }
+    .bg-red-600\/20 { background-color: rgba(220,38,38,0.2); }
+    .bg-red-600\/25 { background-color: rgba(220,38,38,0.25); }
+    .bg-red-600\/80 { background-color: rgba(220,38,38,0.8); }
+    .bg-red-600\/90 { background-color: rgba(220,38,38,0.9); }
+    .bg-red-900\/30 { background-color: rgba(127,29,29,0.3); }
+    .bg-green-400\/10 { background-color: rgba(74,222,128,0.1); }
+    .bg-yellow-400\/10 { background-color: rgba(250,204,21,0.1); }
+    .bg-yellow-500\/8 { background-color: rgba(234,179,8,0.08); }
+    .bg-yellow-500\/15 { background-color: rgba(234,179,8,0.15); }
+    .bg-yellow-500\/90 { background-color: rgba(234,179,8,0.9); }
+    .border-blue-500\/10 { border-color: rgba(59,130,246,0.1); }
+    .border-green-500\/10 { border-color: rgba(34,197,94,0.1); }
+    .border-red-600\/25 { border-color: rgba(220,38,38,0.25); }
+    .border-red-600\/30 { border-color: rgba(220,38,38,0.3); }
+    .border-green-600\/30 { border-color: rgba(22,163,74,0.3); }
+    .border-yellow-500\/15 { border-color: rgba(234,179,8,0.15); }
+    .text-yellow-500\/80 { color: rgba(234,179,8,0.8); }
+    .text-red-400\/10 { color: rgba(248,113,113,0.1); }
+    .text-green-400\/10 { color: rgba(74,222,128,0.1); }
+    .text-yellow-400\/10 { color: rgba(250,204,21,0.1); }
+    .bg-green-600\/20 { background-color: rgba(22,163,74,0.2); }
+    .bg-red-400\/10 { background-color: rgba(248,113,113,0.1); }
+    .bg-green-400\/10 { background-color: rgba(74,222,128,0.1); }
+    .text-white\/8 { color: rgba(255,255,255,0.08); }
   </style>
 
-  <!-- Import Maps -->
   <script type="importmap">
     {
       "imports": {
@@ -116,7 +108,6 @@
     }
   </script>
 </head>
-
 <body>
   <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
