@@ -39,6 +39,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [audioLevel, setAudioLevel] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
   const [stats, setStats] = useState({ resolution: 'Loading...', bitrate: 0 });
+  const [playAttempted, setPlayAttempted] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -52,6 +53,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const audioAnimationRef = useRef<number | null>(null);
   const isConnectingRef = useRef(false);
   const mountedRef = useRef(true);
+  const playPromiseRef = useRef<Promise<void> | null>(null);
 
   const adminPeerId = `${PEER_PREFIX}${streamId}`;
 
@@ -97,9 +99,6 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
         const audioStream = new MediaStream(audioTracks);
         sourceRef.current = audioContext.createMediaStreamSource(audioStream);
         sourceRef.current.connect(analyser);
-        
-        // Don't connect to destination to avoid double audio
-        // analyser.connect(audioContext.destination);
         
         // Start monitoring audio levels
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
@@ -159,24 +158,37 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     if (!video) return false;
     
     try {
+      // Cancel any existing play promise
+      if (playPromiseRef.current) {
+        try {
+          await playPromiseRef.current;
+        } catch {
+          // Ignore errors from previous play
+        }
+      }
+      
       // Ensure video is not muted by default
       video.muted = false;
       video.volume = volume;
       
       if (video.paused) {
-        // Some browsers require user interaction to play audio
+        console.log('[Viewer] Attempting to play');
         const playPromise = video.play();
-        if (playPromise !== undefined) {
-          await playPromise;
-          setPlaying(true);
-          return true;
-        }
+        playPromiseRef.current = playPromise;
+        
+        await playPromise;
+        console.log('[Viewer] Play successful');
+        setPlaying(true);
+        setPlayAttempted(true);
+        return true;
       }
       return true;
     } catch (e) {
       console.warn('[Viewer] Play failed:', e);
-      // If autoplay failed, we'll need user interaction
+      setPlaying(false);
       return false;
+    } finally {
+      playPromiseRef.current = null;
     }
   }, [volume]);
 
@@ -285,24 +297,35 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
         isConnectingRef.current = false;
         
         // Create a proper audio+video dummy stream for the call
-        // This ensures audio is negotiated in the SDP
         const setupDummyStream = async () => {
           try {
-            // Try to get a dummy audio context to create a silent audio track
-            const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-            const oscillator = audioContext.createOscillator();
-            const dst = oscillator.connect(audioContext.createMediaStreamDestination());
-            oscillator.start();
-            
             // Create canvas for video
             const canvas = document.createElement('canvas');
             canvas.width = 2;
             canvas.height = 2;
             const canvasStream = canvas.captureStream(1);
             
-            // Combine audio and video streams
+            // Try to get a dummy audio context
+            let audioTracks: MediaStreamTrack[] = [];
+            try {
+              const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+              const oscillator = audioContext.createOscillator();
+              const dst = oscillator.connect(audioContext.createMediaStreamDestination());
+              oscillator.start();
+              audioTracks = dst.stream.getAudioTracks();
+              
+              // Stop oscillator after a short time
+              setTimeout(() => {
+                oscillator.stop();
+                audioContext.close();
+              }, 500);
+            } catch (err) {
+              console.warn('[Viewer] Could not create audio track:', err);
+            }
+            
+            // Combine tracks
             const tracks = [
-              ...dst.stream.getAudioTracks(),
+              ...audioTracks,
               ...canvasStream.getVideoTracks()
             ];
             
@@ -312,24 +335,16 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             const call = peer.call(adminPeerId, dummyStream);
             callRef.current = call;
 
-            // Stop oscillator after call is established
-            setTimeout(() => {
-              oscillator.stop();
-              audioContext.close();
-            }, 1000);
-
             setupCallHandlers(call);
           } catch (err) {
-            console.warn('[Viewer] Could not create audio track, falling back to video only');
-            // Fallback to video-only dummy stream
+            console.warn('[Viewer] Error setting up dummy stream:', err);
+            // Fallback to video-only
             const canvas = document.createElement('canvas');
             canvas.width = 2;
             canvas.height = 2;
             const dummyStream = canvas.captureStream(1);
-            
             const call = peer.call(adminPeerId, dummyStream);
             callRef.current = call;
-            
             setupCallHandlers(call);
           }
         };
@@ -339,7 +354,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
             if (!mountedRef.current) return;
             
             console.log('[Viewer] Received stream');
-            console.log('[Viewer] Stream tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled} (${t.readyState})`));
+            console.log('[Viewer] Stream tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
             
             const video = videoRef.current;
             if (video) {
@@ -356,7 +371,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                 // Ensure audio tracks are enabled
                 audioTracks.forEach(track => {
                   track.enabled = true;
-                  console.log(`[Viewer] Audio track ${track.id} enabled: ${track.enabled}, muted: ${track.muted}`);
+                  console.log(`[Viewer] Audio track ${track.id} enabled: ${track.enabled}`);
                 });
                 
                 // Initialize audio analysis
@@ -372,26 +387,18 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
               video.muted = false;
               video.volume = volume;
               
-              // Force audio to be enabled
-              if (audioTracks.length > 0) {
-                // Some browsers need this to enable audio
-                setTimeout(() => {
-                  if (video) {
-                    video.muted = false;
-                    // Force a small play/pause to activate audio
-                    if (!video.paused) {
-                      video.pause();
-                      video.play().catch(e => console.warn('[Viewer] Replay failed:', e));
-                    }
-                  }
-                }, 500);
-              }
+              // Try to play - but don't pause/replay unnecessarily
+              setPlayAttempted(false);
               
-              // Try to play
-              safePlay().catch(() => {
-                // Autoplay prevented, user will need to click play
-                setPlaying(false);
-              });
+              // Small delay to ensure stream is attached
+              setTimeout(() => {
+                if (mountedRef.current && video && !playAttempted) {
+                  safePlay().catch(() => {
+                    // Autoplay prevented, user will need to click play
+                    setPlaying(false);
+                  });
+                }
+              }, 500);
 
               // Update stream info
               if (videoTracks.length > 0) {
@@ -461,7 +468,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       console.error('[Viewer] Failed to create peer:', err);
       isConnectingRef.current = false;
     }
-  }, [adminPeerId, destroyPeer, safePlay, volume, initAudioAnalysis, cleanupAudioAnalysis]);
+  }, [adminPeerId, destroyPeer, safePlay, volume, initAudioAnalysis, cleanupAudioAnalysis, playAttempted]);
 
   // Initialize connection
   useEffect(() => {
@@ -491,8 +498,14 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       setDuration(dur);
       setIsLiveStream(!isFinite(dur) || dur > 86400);
     };
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const onPlay = () => {
+      console.log('[Viewer] Video playing');
+      setPlaying(true);
+    };
+    const onPause = () => {
+      console.log('[Viewer] Video paused');
+      setPlaying(false);
+    };
     const onVolumeChange = () => {
       setMuted(video.muted);
       setVolume(video.volume);
@@ -503,7 +516,13 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       }
     };
     const onWaiting = () => setIsBuffering(true);
-    const onPlaying = () => setIsBuffering(false);
+    const onPlaying = () => {
+      console.log('[Viewer] Video playing event');
+      setIsBuffering(false);
+    };
+    const onError = (e: Event) => {
+      console.error('[Viewer] Video error:', e);
+    };
 
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('loadedmetadata', onLoadedMetadata);
@@ -513,6 +532,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     video.addEventListener('progress', onProgress);
     video.addEventListener('waiting', onWaiting);
     video.addEventListener('playing', onPlaying);
+    video.addEventListener('error', onError);
 
     return () => {
       video.removeEventListener('timeupdate', onTimeUpdate);
@@ -523,6 +543,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       video.removeEventListener('progress', onProgress);
       video.removeEventListener('waiting', onWaiting);
       video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('error', onError);
     };
   }, []);
 
@@ -598,7 +619,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
         )}
 
         {/* Audio Visualizer (when audio is present) */}
-        {hasVideo && hasAudio && (
+        {hasVideo && hasAudio && playing && (
           <div className="absolute bottom-16 left-4 right-4 flex items-center justify-center gap-0.5 h-8 pointer-events-none">
             {[...Array(20)].map((_, i) => {
               const barHeight = Math.max(2, audioLevel * 24 * (Math.sin(i * 0.5) * 0.5 + 0.5));
@@ -752,7 +773,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
               </div>
 
               {/* Audio Level Indicator */}
-              {hasAudio && (
+              {hasAudio && playing && (
                 <div className="flex items-center gap-0.5 ml-1">
                   <div className={`w-1 h-3 ${audioLevel > 0.1 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
                   <div className={`w-1 h-4 ${audioLevel > 0.3 ? 'bg-green-500' : 'bg-white/30'} rounded-full transition-colors`} />
