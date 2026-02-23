@@ -12,57 +12,46 @@
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
 
   <style>
-    /* ---------- Animations ---------- */
+    /* ── Fonts ────────────────────────────────────────────────────────────── */
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+
+    /* ── Animations ───────────────────────────────────────────────────────── */
     @keyframes live-pulse {
       0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
+      50% { opacity: 0.3; }
     }
-    .live-dot { animation: live-pulse 1.2s ease-in-out infinite; }
+    .live-dot { animation: live-pulse 1.4s ease-in-out infinite; }
 
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
-    .spin { animation: spin 0.75s linear infinite; }
+    .spin { animation: spin 0.9s linear infinite; }
 
-    /* ---------- Custom Scrollbar ---------- */
-    .custom-scrollbar::-webkit-scrollbar {
-      width: 4px;
+    @keyframes fade-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
     }
-    .custom-scrollbar::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    .custom-scrollbar::-webkit-scrollbar-thumb {
-      background: #101010;
-      border-radius: 4px;
-    }
+    .fade-in { animation: fade-in 0.4s ease both; }
 
-    /* ---------- Seek Bar ---------- */
-    input[type="range"].seek-bar {
-      -webkit-appearance: none;
-      appearance: none;
-      background: transparent;
-      width: 100%;
-      cursor: pointer;
+    @keyframes slide-up {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
     }
-    input[type="range"].seek-bar::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: white;
-      margin-top: -4px;
-      opacity: 0;
-      transition: opacity 0.2s;
-    }
-    .group:hover input[type="range"].seek-bar::-webkit-slider-thumb {
-      opacity: 1;
-    }
-    input[type="range"].seek-bar::-webkit-slider-runnable-track {
-      height: 4px;
-      background: transparent;
-    }
+    .slide-up { animation: slide-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
-    /* ---------- Volume Slider ---------- */
+    @keyframes scale-in {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .scale-in { animation: scale-in 0.25s ease both; }
+
+    /* ── Custom Scrollbar ─────────────────────────────────────────────────── */
+    .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #555; }
+
+    /* ── Volume Slider ────────────────────────────────────────────────────── */
     input[type="range"].volume-slider {
       -webkit-appearance: none;
       appearance: none;
@@ -73,30 +62,46 @@
     }
     input[type="range"].volume-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
-      width: 12px;
-      height: 12px;
+      width: 14px;
+      height: 14px;
       border-radius: 50%;
       background: white;
       cursor: pointer;
+      box-shadow: 0 0 0 2px rgba(255,255,255,0.2);
+      transition: transform 0.1s;
+    }
+    input[type="range"].volume-slider::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
     }
 
-    /* ---------- Mobile Optimizations ---------- */
-    @media (max-width: 640px) {
-      .video-container {
-        aspect-ratio: 16/9;
-        width: 100%;
-      }
-    }
+    /* ── Select styling ───────────────────────────────────────────────────── */
+    select option { background: #1a1a1a; color: white; }
 
-    /* ---------- Global UX ---------- */
+    /* ── Global ───────────────────────────────────────────────────────────── */
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+    }
     body {
+      font-family: 'DM Sans', system-ui, sans-serif;
       user-select: none;
       -webkit-user-select: none;
       -webkit-tap-highlight-color: transparent;
+      background: #0f0f0f;
+      color: white;
     }
-    html {
-      scroll-behavior: smooth;
+    :root {
+      --red: #ff0033;
+      --red-dark: #cc0025;
     }
+    html { scroll-behavior: smooth; }
+
+    /* ── Video no controls ─────────────────────────────────────────────────── */
+    video::-webkit-media-controls { display: none !important; }
+    video { outline: none; }
+
+    /* ── Border 3 (not in default tailwind) ─────────────────────────────── */
+    .border-3 { border-width: 3px; }
   </style>
 
   <!-- Import Maps -->
@@ -112,7 +117,7 @@
   </script>
 </head>
 
-<body class="bg-white overflow-x-hidden">
+<body>
   <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
 </body>
