@@ -41,7 +41,10 @@ const AdminPanel: React.FC = () => {
   const [isFileUploading, setIsFileUploading] = useState(false);
   const [uploadFileName, setUploadFileName] = useState('');
   const [streamDuration, setStreamDuration] = useState(0);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+  // Separate state for preview audio (local mute) - default to muted to prevent feedback
+  const [isPreviewMuted, setIsPreviewMuted] = useState(true);
+  // Track if stream actually has audio
+  const [hasAudio, setHasAudio] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -108,6 +111,7 @@ const AdminPanel: React.FC = () => {
 
     peer.on('open', () => setPeerStatus('ready'));
     peer.on('call', (call: any) => {
+      // Answer with the actual stream (which has audio)
       call.answer(stream);
       setViewers(prev => { 
         const n = new Map(prev); 
@@ -141,16 +145,22 @@ const AdminPanel: React.FC = () => {
 
   const setupStream = useCallback(async (stream: MediaStream, newMode: StreamMode, id: string) => {
     streamRef.current = stream;
+    
+    // Check if stream has audio tracks
+    const audioTracks = stream.getAudioTracks();
+    setHasAudio(audioTracks.length > 0);
+    
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
-      videoRef.current.muted = true; // Always mute preview to prevent feedback
+      // Mute preview locally to prevent feedback, but stream still has audio
+      videoRef.current.muted = isPreviewMuted;
       try { await videoRef.current.play(); } catch {}
     }
     setMode(newMode);
     setStreamId(id);
     setStreamUrl(`${window.location.origin}${window.location.pathname}#/viewer/${id}`);
     createPeer(id, stream);
-  }, [createPeer]);
+  }, [createPeer, isPreviewMuted]);
 
   const generateId = () => `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
 
@@ -217,7 +227,8 @@ const AdminPanel: React.FC = () => {
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.muted = true; // Mute preview only
+        // Mute preview locally
+        videoRef.current.muted = isPreviewMuted;
         await videoRef.current.play();
       }
       
@@ -249,12 +260,15 @@ const AdminPanel: React.FC = () => {
     setStreamUrl('');
     setStreamId('');
     setUploadFileName('');
+    setHasAudio(false);
   }, [destroyPeer]);
 
+  // Toggle preview audio (local mute only - doesn't affect stream)
   const togglePreviewAudio = () => {
     if (videoRef.current) {
-      videoRef.current.muted = !videoRef.current.muted;
-      setIsAudioEnabled(!videoRef.current.muted);
+      const newMutedState = !videoRef.current.muted;
+      videoRef.current.muted = newMutedState;
+      setIsPreviewMuted(newMutedState);
     }
   };
 
@@ -325,7 +339,7 @@ const AdminPanel: React.FC = () => {
                   ref={videoRef}
                   autoPlay
                   playsInline
-                  muted={isAudioEnabled}
+                  muted={isPreviewMuted} // This only affects local preview
                   className="w-full h-full object-contain"
                 />
                 
@@ -373,25 +387,32 @@ const AdminPanel: React.FC = () => {
                       <span className="px-2 py-1 bg-gray-900/75 backdrop-blur-sm rounded-md text-xs text-gray-300">
                         {mode === StreamMode.LIVE ? 'Camera' : mode === StreamMode.SCREEN ? 'Screen' : 'File'}
                       </span>
+                      {hasAudio && (
+                        <span className="px-2 py-1 bg-gray-900/75 backdrop-blur-sm rounded-md text-xs text-gray-300">
+                          Audio Available
+                        </span>
+                      )}
                     </div>
 
-                    {/* Audio toggle for preview only */}
-                    <button
-                      onClick={togglePreviewAudio}
-                      className="absolute top-3 right-3 p-2 bg-gray-900/75 backdrop-blur-sm rounded-lg hover:bg-gray-900 transition-colors"
-                      title={isAudioEnabled ? 'Preview audio muted' : 'Preview audio enabled'}
-                    >
-                      {isAudioEnabled ? (
-                        <svg className="w-4 h-4 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
-                        </svg>
-                      ) : (
-                        <svg className="w-4 h-4 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                        </svg>
-                      )}
-                    </button>
+                    {/* Audio toggle for preview only - doesn't affect stream */}
+                    {hasAudio && (
+                      <button
+                        onClick={togglePreviewAudio}
+                        className="absolute top-3 right-3 p-2 bg-gray-900/75 backdrop-blur-sm rounded-lg hover:bg-gray-900 transition-colors"
+                        title={isPreviewMuted ? 'Unmute preview (local only)' : 'Mute preview (local only)'}
+                      >
+                        {isPreviewMuted ? (
+                          <svg className="w-4 h-4 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -682,6 +703,10 @@ const AdminPanel: React.FC = () => {
                 <div className="flex items-start gap-2.5">
                   <span className="text-sm">📱</span>
                   <p className="text-xs text-gray-600">Viewers can watch on mobile or desktop</p>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <span className="text-sm">🔊</span>
+                  <p className="text-xs text-gray-600">Audio is always enabled for viewers</p>
                 </div>
               </div>
             </div>
