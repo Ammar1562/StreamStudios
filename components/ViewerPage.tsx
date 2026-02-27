@@ -26,7 +26,7 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
 
   // Player state
   const [playing, setPlaying] = useState(false);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(true);   // start muted so autoplay succeeds, unmute after
   const [volume, setVolume] = useState(1);
   const [fullscreen, setFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
@@ -214,12 +214,13 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.muted = !video.muted;
-    setMuted(video.muted);
-    if (!video.muted && video.volume === 0) {
-      video.volume = 0.5;
-      setVolume(0.5);
+    const nowMuted = !video.muted;
+    video.muted = nowMuted;
+    if (!nowMuted && video.volume === 0) {
+      video.volume = 1;
+      setVolume(1);
     }
+    setMuted(nowMuted);
   }, []);
 
   const changeVolume = useCallback((val: number) => {
@@ -310,11 +311,10 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           const video = videoRef.current;
           if (!video) return;
 
-          // Assign live stream
+          // Assign live stream — start muted so browser allows autoplay
           video.srcObject = remoteStream;
-          // DO NOT mute — viewer must hear audio
-          video.muted = false;
-          video.volume = volume;
+          video.muted = true;
+          video.volume = 1;
 
           setHasVideo(true);
           setStatus('live');
@@ -322,9 +322,17 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           isPlayingDvrRef.current = false;
           setIsAtLiveEdge(true);
 
-          // Attempt autoplay; if blocked, user taps play
-          video.play().catch(() => {
+          // Play muted first (always succeeds), then immediately unmute
+          video.play().then(() => {
+            video.muted = false;
+            video.volume = 1;
+            setMuted(false);
+            setVolume(1);
+            setPlaying(true);
+          }).catch(() => {
+            // Autoplay fully blocked (rare) — show play button, stay muted until user taps
             setPlaying(false);
+            setMuted(true);
           });
 
           // Update resolution info
@@ -506,10 +514,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           ref={videoRef}
           className="w-full h-full object-contain bg-black"
           playsInline
-          autoPlay
           onClick={togglePlay}
           onDoubleClick={toggleFullscreen}
-          // No muted attr here — we want audio
         />
 
         {/* ── Connecting overlay ── */}
@@ -788,16 +794,16 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           </div>
         </div>
 
-        {/* Mobile volume tap zone (unmute hint) */}
+        {/* Unmute banner — shown on any device when muted after autoplay */}
         {hasVideo && muted && (
           <div
-            className="absolute top-14 right-3 flex items-center gap-2 px-3 py-1.5 bg-black/70 backdrop-blur-sm rounded-full cursor-pointer sm:hidden"
+            className="absolute top-14 right-3 flex items-center gap-2 px-3 py-1.5 bg-black/75 backdrop-blur-sm rounded-full cursor-pointer z-10 select-none"
             onClick={toggleMute}
           >
-            <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
+            <svg className="w-4 h-4 text-white flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
               <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06A8.99 8.99 0 0017.73 19.73L19 21 20.27 19.73 5.54 5 4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
             </svg>
-            <span className="text-white text-xs font-medium">Tap to unmute</span>
+            <span className="text-white text-sm font-medium">Click to unmute</span>
           </div>
         )}
       </div>
