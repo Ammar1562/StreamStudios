@@ -51,6 +51,11 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [selectedQuality, setSelectedQuality] = useState('auto');
   const [buffered, setBuffered] = useState(0);
 
+  // Audio troubleshooting
+  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+  const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
+  const [audioData, setAudioData] = useState(new Uint8Array());
+
   // DVR / progress state
   const [dvrPosition, setDvrPosition] = useState(0);      // seconds from start of buffer
   const [dvrTotal, setDvrTotal] = useState(0);             // total buffered seconds
@@ -344,6 +349,40 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           isPlayingDvrRef.current = false;
           setIsAtLiveEdge(true);
 
+          // Initialize audio context for troubleshooting
+          if (hasAudioTrack) {
+            try {
+              const ctx = new AudioContext();
+              const analyser = ctx.createAnalyser();
+              const source = ctx.createMediaStreamSource(remoteStream);
+              source.connect(analyser);
+              analyser.fftSize = 2048;
+              
+              setAudioContext(ctx);
+              setAudioAnalyser(analyser);
+              
+              // Start audio analysis
+              const bufferLength = analyser.frequencyBinCount;
+              const audioDataArray = new Uint8Array(bufferLength);
+              setAudioData(audioDataArray);
+              
+              // Audio analysis loop
+              const analyzeAudio = () => {
+                if (!mountedRef.current || !analyser) return;
+                analyser.getByteFrequencyData(audioDataArray);
+                setAudioData(prev => {
+                  const copy = new Uint8Array(audioDataArray);
+                  return copy;
+                });
+                requestAnimationFrame(analyzeAudio);
+              };
+              analyzeAudio();
+              
+            } catch (e) {
+              console.warn('[Viewer] Audio context error:', e);
+            }
+          }
+
           video.play().then(() => {
             setMuted(false);
             setVolume(1);
@@ -423,13 +462,22 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     const onFSChange = () => setFullscreen(!!document.fullscreenElement);
     document.addEventListener('fullscreenchange', onFSChange);
 
-    return () => {
-      mountedRef.current = false;
-      document.removeEventListener('fullscreenchange', onFSChange);
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
-      if (dvrObjectUrlRef.current) URL.revokeObjectURL(dvrObjectUrlRef.current);
-      destroyPeer();
-    };
+      return () => {
+        mountedRef.current = false;
+        document.removeEventListener('fullscreenchange', onFSChange);
+        if (controlsTimer.current) clearTimeout(controlsTimer.current);
+        if (dvrObjectUrlRef.current) URL.revokeObjectURL(dvrObjectUrlRef.current);
+        destroyPeer();
+        
+        // Cleanup audio context
+        if (audioContext) {
+          try {
+            audioContext.close();
+          } catch (e) {
+            console.warn('[Viewer] Audio context close error:', e);
+          }
+        }
+      };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -508,20 +556,20 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
 
   if (status === 'ended') {
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center p-6">
+      <div className="min-h-screen bg-white flex items-center justify-center p-6">
         <div className="max-w-md w-full text-center space-y-6">
-          <div className="w-20 h-20 mx-auto bg-white/10 rounded-2xl flex items-center justify-center">
-            <svg className="w-10 h-10 text-white/40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <div className="w-20 h-20 mx-auto bg-gray-100 rounded-2xl flex items-center justify-center">
+            <svg className="w-10 h-10 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
           </div>
           <div>
-            <h2 className="text-2xl font-bold text-white">Stream Ended</h2>
-            <p className="text-white/50 mt-2">This broadcast has ended or the link is no longer valid.</p>
+            <h2 className="text-2xl font-bold text-gray-900">Stream Ended</h2>
+            <p className="text-gray-500 mt-2">This broadcast has ended or the link is no longer valid.</p>
           </div>
           <button
             onClick={() => { window.location.hash = '#/'; }}
-            className="px-6 py-2 bg-white text-black font-medium rounded-full hover:bg-white/90 transition-colors"
+            className="px-6 py-2 bg-gray-900 text-white font-medium rounded-full hover:bg-gray-800 transition-colors"
           >
             Go Home
           </button>
@@ -557,19 +605,19 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           width: 12px;
           height: 12px;
           border-radius: 50%;
-          background: white;
+          background: #4d4d4dff;
           cursor: pointer;
         }
         .volume-slider::-moz-range-thumb {
           width: 12px;
           height: 12px;
           border-radius: 50%;
-          background: white;
+          background: #4d4d4dff;
           cursor: pointer;
           border: none;
         }
       `}</style>
-      <div className="min-h-screen bg-[#0f0f0f] flex flex-col">
+      <div className="min-h-screen bg-white flex flex-col">
       {/* Player */}
       <div
         ref={containerRef}
