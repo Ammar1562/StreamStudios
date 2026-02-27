@@ -18,8 +18,16 @@ const RESOLUTIONS: Resolution[] = [
   { width: 426,  height: 240,  label: '240p'  },
   { width: 640,  height: 360,  label: '360p'  },
   { width: 854,  height: 480,  label: '480p'  },
-  { width: 1280, height: 720,  label: '720p'  },
-  { width: 1920, height: 1080, label: '1080p' },
+  { width: 1280, height: 720,  label: '720p HD'  },
+  { width: 1920, height: 1080, label: '1080p FHD' },
+  { width: 2560, height: 1440, label: '1440p QHD' },
+];
+
+const BITRATES = [
+  { label: 'Low (1.5 Mbps)', value: 1500000 },
+  { label: 'Medium (3 Mbps)', value: 3000000 },
+  { label: 'High (6 Mbps)', value: 6000000 },
+  { label: 'Ultra (10 Mbps)', value: 10000000 },
 ];
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -85,6 +93,7 @@ const AdminPanel: React.FC = () => {
   const [selectedVideoDevice, setSelectedVideoDevice] = useState('');
   const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
   const [selectedResolution, setSelectedResolution]   = useState<Resolution>(RESOLUTIONS[3]);
+  const [selectedBitrate, setSelectedBitrate] = useState(BITRATES[2].value);
   const [viewers, setViewers]               = useState<Map<string,{id:string;joinedAt:number}>>(new Map());
   const [isFileLoading, setIsFileLoading]   = useState(false);
   const [uploadFileName, setUploadFileName] = useState('');
@@ -220,12 +229,28 @@ const AdminPanel: React.FC = () => {
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
       const stream = await navigator.mediaDevices.getUserMedia({
         video: selectedVideoDevice
-          ? { deviceId: { exact: selectedVideoDevice }, width: { ideal: selectedResolution.width }, height: { ideal: selectedResolution.height } }
-          : { width: { ideal: selectedResolution.width }, height: { ideal: selectedResolution.height } },
+          ? { 
+              deviceId: { exact: selectedVideoDevice }, 
+              width: { ideal: selectedResolution.width }, 
+              height: { ideal: selectedResolution.height },
+              frameRate: { ideal: 30 }
+            }
+          : { 
+              width: { ideal: selectedResolution.width }, 
+              height: { ideal: selectedResolution.height },
+              frameRate: { ideal: 30 }
+            },
         audio: selectedAudioDevice
-          ? { deviceId: { exact: selectedAudioDevice }, echoCancellation: true, noiseSuppression: true, sampleRate: 48000 }
-          : { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+          ? { deviceId: { exact: selectedAudioDevice }, echoCancellation: true, noiseSuppression: true, sampleRate: 48000, autoGainControl: true }
+          : { echoCancellation: true, noiseSuppression: true, sampleRate: 48000, autoGainControl: true },
       });
+      
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        const constraints = videoTrack.getSettings();
+        console.log('[Broadcaster] Video constraints:', constraints);
+      }
+      
       await setupStream(stream, StreamMode.LIVE, generateId());
     } catch (e: any) {
       setError(e.message || 'Camera access denied');
@@ -664,19 +689,40 @@ const AdminPanel: React.FC = () => {
               <>
                 {/* Resolution */}
                 <div>
-                  <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">Resolution</p>
-                  <div className="grid grid-cols-5 gap-1.5">
-                    {RESOLUTIONS.map(r => (
+                  <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">Video Quality</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {RESOLUTIONS.slice(0, 6).map(r => (
                       <button
                         key={r.label}
                         onClick={() => setSelectedResolution(r)}
-                        className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                        className={`py-2.5 px-3 rounded-lg text-xs font-semibold transition-all flex flex-col items-center gap-1 ${
                           selectedResolution.label === r.label
                             ? 'bg-red-600 text-white'
-                            : 'bg-white/5 text-white/50 hover:bg-white/10 hover:text-white'
+                            : 'bg-white/5 text-white/50 hover:bg-white/10 hover:text-white border border-white/5'
                         }`}
                       >
-                        {r.label}
+                        <span>{r.label.split(' ')[0]}</span>
+                        <span className="text-[10px] opacity-60">{r.width}×{r.height}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Bitrate */}
+                <div>
+                  <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">Stream Bitrate</p>
+                  <div className="space-y-1">
+                    {BITRATES.map(b => (
+                      <button
+                        key={b.value}
+                        onClick={() => setSelectedBitrate(b.value)}
+                        className={`w-full py-2 px-3 rounded-lg text-sm text-left transition-all ${
+                          selectedBitrate === b.value
+                            ? 'bg-red-600/20 text-red-400 border border-red-600/40'
+                            : 'bg-white/5 text-white/50 hover:bg-white/10 hover:text-white border border-white/5'
+                        }`}
+                      >
+                        {b.label}
                       </button>
                     ))}
                   </div>
@@ -685,11 +731,11 @@ const AdminPanel: React.FC = () => {
                 {/* Video device */}
                 {videoDevices.length > 0 && (
                   <div>
-                    <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">Camera</p>
+                    <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">Camera Device</p>
                     <select
                       value={selectedVideoDevice}
                       onChange={e => setSelectedVideoDevice(e.target.value)}
-                      className="w-full bg-white/5 border border-white/10 text-white text-sm rounded-lg px-3 py-2 outline-none focus:border-white/30"
+                      className="w-full bg-white/5 border border-white/10 text-white text-sm rounded-lg px-3 py-2.5 outline-none focus:border-white/30"
                     >
                       {videoDevices.map(d => (
                         <option key={d.deviceId} value={d.deviceId} className="bg-[#1a1a1a]">{d.label}</option>
@@ -701,11 +747,11 @@ const AdminPanel: React.FC = () => {
                 {/* Audio device */}
                 {audioDevices.length > 0 && (
                   <div>
-                    <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">Microphone</p>
+                    <p className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">Microphone Device</p>
                     <select
                       value={selectedAudioDevice}
                       onChange={e => setSelectedAudioDevice(e.target.value)}
-                      className="w-full bg-white/5 border border-white/10 text-white text-sm rounded-lg px-3 py-2 outline-none focus:border-white/30"
+                      className="w-full bg-white/5 border border-white/10 text-white text-sm rounded-lg px-3 py-2.5 outline-none focus:border-white/30"
                     >
                       {audioDevices.map(d => (
                         <option key={d.deviceId} value={d.deviceId} className="bg-[#1a1a1a]">{d.label}</option>

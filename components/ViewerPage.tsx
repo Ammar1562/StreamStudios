@@ -11,13 +11,22 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.services.mozilla.com' },
   { urls: 'turn:a.relay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:a.relay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
-// DVR buffer: how many seconds of live stream to keep in memory
-const DVR_BUFFER_SECONDS = 120;
+const DVR_BUFFER_SECONDS = 30;
+
+const QUALITY_OPTIONS = [
+  { label: 'Auto', value: 'auto' },
+  { label: '1080p', value: '1080p' },
+  { label: '720p', value: '720p' },
+  { label: '480p', value: '480p' },
+  { label: '360p', value: '360p' },
+  { label: '240p', value: '240p' },
+];
 
 const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
   const [status, setStatus] = useState<'connecting' | 'live' | 'ended'>('connecting');
@@ -26,16 +35,21 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
 
   // Player state
   const [playing, setPlaying] = useState(false);
-  const [muted, setMuted] = useState(true);   // start muted so autoplay succeeds, unmute after
+  const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [fullscreen, setFullscreen] = useState(false);
+  const [theaterMode, setTheaterMode] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [showVolume, setShowVolume] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showQuality, setShowQuality] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [hasVideo, setHasVideo] = useState(false);
+  const [hasAudio, setHasAudio] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
   const [resolution, setResolution] = useState('');
+  const [selectedQuality, setSelectedQuality] = useState('auto');
+  const [buffered, setBuffered] = useState(0);
 
   // DVR / progress state
   const [dvrPosition, setDvrPosition] = useState(0);      // seconds from start of buffer
@@ -307,44 +321,55 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           if (!mountedRef.current) return;
           console.log('[Viewer] Got stream, tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
 
+          const videoTrack = remoteStream.getVideoTracks()[0];
+          const audioTrack = remoteStream.getAudioTracks()[0];
+          
+          const hasVideoTrack = !!videoTrack;
+          const hasAudioTrack = !!audioTrack && audioTrack.enabled;
+          
+          console.log('[Viewer] Video:', hasVideoTrack, 'Audio:', hasAudioTrack);
+
           liveStreamRef.current = remoteStream;
           const video = videoRef.current;
           if (!video) return;
 
-          // Assign live stream — start muted so browser allows autoplay
           video.srcObject = remoteStream;
-          video.muted = true;
+          video.muted = false;
           video.volume = 1;
 
-          setHasVideo(true);
+          setHasVideo(hasVideoTrack);
+          setHasAudio(hasAudioTrack);
           setStatus('live');
           setIsBuffering(false);
           isPlayingDvrRef.current = false;
           setIsAtLiveEdge(true);
 
-          // Play muted first (always succeeds), then immediately unmute
           video.play().then(() => {
-            video.muted = false;
-            video.volume = 1;
             setMuted(false);
             setVolume(1);
             setPlaying(true);
-          }).catch(() => {
-            // Autoplay fully blocked (rare) — show play button, stay muted until user taps
+          }).catch((e) => {
+            console.warn('[Viewer] Autoplay blocked:', e);
             setPlaying(false);
             setMuted(true);
           });
 
-          // Update resolution info
-          const videoTrack = remoteStream.getVideoTracks()[0];
           if (videoTrack) {
             const settings = videoTrack.getSettings();
             if (settings.width && settings.height) {
               setResolution(`${settings.width}×${settings.height}`);
             }
+            videoTrack.onended = () => {
+              if (!mountedRef.current) return;
+              setStatus('ended');
+              setErrorMsg('The broadcast has ended');
+            };
           }
 
-          // Start DVR recording
+          if (!hasAudioTrack) {
+            console.warn('[Viewer] No audio track in stream');
+          }
+
           startDvrRecording(remoteStream);
         });
 
@@ -423,11 +448,25 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     };
     const onTimeUpdate = () => {
       if (!isPlayingDvrRef.current) return;
-      // Map current playback time to DVR position
       const dur = video.duration;
       if (isFinite(dur) && dur > 0) {
         const frac = video.currentTime / dur;
         setDvrPosition(frac * dvrTotal);
+      }
+    };
+    const onProgress = () => {
+      if (video.buffered.length > 0) {
+        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+        setBuffered(bufferedEnd);
+      }
+    };
+    const onLoadedMetadata = () => {
+      const videoTrack = video.srcObject ? (video.srcObject as MediaStream).getVideoTracks()[0] : null;
+      if (videoTrack) {
+        const settings = videoTrack.getSettings();
+        if (settings.width && settings.height) {
+          setResolution(`${settings.width}×${settings.height}`);
+        }
       }
     };
 
@@ -437,6 +476,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     video.addEventListener('playing', onPlaying);
     video.addEventListener('volumechange', onVolumeChange);
     video.addEventListener('timeupdate', onTimeUpdate);
+    video.addEventListener('progress', onProgress);
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
 
     return () => {
       video.removeEventListener('play', onPlay);
@@ -445,6 +486,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
       video.removeEventListener('playing', onPlaying);
       video.removeEventListener('volumechange', onVolumeChange);
       video.removeEventListener('timeupdate', onTimeUpdate);
+      video.removeEventListener('progress', onProgress);
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
     };
   }, [dvrTotal]);
 
@@ -487,17 +530,51 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
     );
   }
 
+  const toggleTheater = useCallback(() => {
+    setTheaterMode(t => !t);
+  }, []);
+
   const volumePercent = (muted ? 0 : volume) * 100;
-  // Progress bar: 0–100 representing position within DVR buffer
   const seekPercent = dvrTotal > 0 ? (dvrPosition / dvrTotal) * 100 : 100;
 
   return (
-    <div className="min-h-screen bg-black flex flex-col">
+    <>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spin { animation: spin 0.8s linear infinite; }
+        @keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .live-dot { animation: live-pulse 1.5s ease-in-out infinite; }
+        .volume-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          height: 4px;
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .volume-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: white;
+          cursor: pointer;
+        }
+        .volume-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: white;
+          cursor: pointer;
+          border: none;
+        }
+      `}</style>
+      <div className="min-h-screen bg-[#0f0f0f] flex flex-col">
       {/* Player */}
       <div
         ref={containerRef}
-        className={`relative bg-black flex-1 ${fullscreen ? 'fixed inset-0 z-50' : 'w-full'}`}
-        style={!fullscreen ? { aspectRatio: '16/9', maxHeight: '100vh' } : {}}
+        className={`relative bg-black ${fullscreen ? 'fixed inset-0 z-50' : theaterMode ? 'w-full max-w-[1280px] mx-auto' : 'w-full'}`}
+        style={!fullscreen ? { aspectRatio: '16/9' } : {}}
         onMouseMove={resetControls}
         onTouchStart={resetControls}
         onMouseLeave={() => {
@@ -567,17 +644,31 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           }`}
         >
           {/* Top bar */}
-          <div className="bg-gradient-to-b from-black/70 to-transparent px-4 pt-3 pb-6">
-            <div className="flex items-center gap-2">
-              {hasVideo && (
-                <span className="flex items-center gap-1.5 px-2 py-1 bg-red-600 rounded text-white text-xs font-bold">
-                  <span className="w-1.5 h-1.5 bg-white rounded-full live-dot" />
-                  LIVE
+          <div className="bg-gradient-to-b from-black/80 to-transparent px-4 pt-4 pb-8">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {hasVideo && (
+                  <span className="flex items-center gap-1.5 px-2.5 py-1 bg-red-600 rounded text-white text-xs font-bold">
+                    <span className="w-1.5 h-1.5 bg-white rounded-full live-dot" />
+                    LIVE
+                  </span>
+                )}
+                {hasAudio && !muted && (
+                  <span className="flex items-center gap-1 px-2 py-1 bg-black/50 rounded text-white/80 text-xs">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+                    </svg>
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {resolution && (
+                  <span className="text-white/60 text-xs font-mono bg-black/40 px-2 py-1 rounded">{resolution}</span>
+                )}
+                <span className="text-white/60 text-xs bg-black/40 px-2 py-1 rounded">
+                  {selectedQuality === 'auto' ? 'Auto' : selectedQuality}
                 </span>
-              )}
-              {resolution && (
-                <span className="text-white/60 text-xs font-mono">{resolution}</span>
-              )}
+              </div>
             </div>
           </div>
 
@@ -724,8 +815,8 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
               {/* Settings */}
               <div className="relative flex-shrink-0">
                 <button
-                  onClick={() => { setShowSettings(s => !s); setShowVolume(false); }}
-                  className="text-white/70 hover:text-white transition-colors p-1"
+                  onClick={() => { setShowSettings(s => !s); setShowVolume(false); setShowQuality(false); }}
+                  className="text-white/80 hover:text-white transition-colors p-1.5"
                   aria-label="Settings"
                 >
                   <svg className="w-5 h-5 sm:w-6 sm:h-6" viewBox="0 0 24 24" fill="currentColor">
@@ -734,27 +825,39 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                 </button>
 
                 {showSettings && (
-                  <div className="absolute bottom-full right-0 mb-2 w-44 bg-gray-900/95 backdrop-blur-sm rounded-xl shadow-2xl border border-white/10 py-2 text-sm">
+                  <div className="absolute bottom-full right-0 mb-2 w-56 bg-[#282828] rounded-lg shadow-2xl py-1 text-sm z-50">
                     {/* Quality */}
-                    <div className="px-3 py-1.5 text-xs font-semibold text-white/40 uppercase tracking-wider">Quality</div>
-                    <div className="px-3 py-1.5 flex items-center justify-between">
-                      <span className="text-white/70">Resolution</span>
-                      <span className="text-white font-mono text-xs">{resolution || 'Auto'}</span>
-                    </div>
-                    <div className="h-px bg-white/10 my-1.5 mx-3" />
+                    <div className="px-3 py-2 text-xs font-semibold text-[#aaa] uppercase tracking-wider">Quality</div>
+                    {QUALITY_OPTIONS.map(q => (
+                      <button
+                        key={q.value}
+                        onClick={() => { setSelectedQuality(q.value); setShowSettings(false); }}
+                        className={`w-full text-left px-4 py-2 flex items-center justify-between hover:bg-white/10 transition-colors ${
+                          selectedQuality === q.value ? 'text-white font-semibold' : 'text-white/80'
+                        }`}
+                      >
+                        <span>{q.label}</span>
+                        {selectedQuality === q.value && (
+                          <svg className="w-4 h-4 text-blue-500" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                    <div className="h-px bg-white/10 my-1" />
                     {/* Playback speed */}
-                    <div className="px-3 py-1.5 text-xs font-semibold text-white/40 uppercase tracking-wider">Speed</div>
+                    <div className="px-3 py-2 text-xs font-semibold text-[#aaa] uppercase tracking-wider">Speed</div>
                     {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => (
                       <button
                         key={rate}
                         onClick={() => changePlaybackRate(rate)}
-                        className={`w-full text-left px-3 py-1.5 flex items-center justify-between hover:bg-white/10 transition-colors ${
-                          playbackRate === rate ? 'text-red-400 font-semibold' : 'text-white/80'
+                        className={`w-full text-left px-4 py-2 flex items-center justify-between hover:bg-white/10 transition-colors ${
+                          playbackRate === rate ? 'text-white font-semibold' : 'text-white/80'
                         }`}
                       >
                         <span>{rate === 1 ? 'Normal' : `${rate}×`}</span>
                         {playbackRate === rate && (
-                          <svg className="w-3 h-3 text-red-400" viewBox="0 0 24 24" fill="currentColor">
+                          <svg className="w-4 h-4 text-blue-500" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
                           </svg>
                         )}
@@ -763,16 +866,28 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
                     {/* DVR info */}
                     {dvrTotal > 0 && (
                       <>
-                        <div className="h-px bg-white/10 my-1.5 mx-3" />
-                        <div className="px-3 py-1.5 text-xs font-semibold text-white/40 uppercase tracking-wider">DVR Buffer</div>
-                        <div className="px-3 py-1.5 text-white/60 text-xs">
-                          {formatTime(dvrTotal)} available
+                        <div className="h-px bg-white/10 my-1" />
+                        <div className="px-4 py-2 text-xs text-white/50">
+                          <span className="text-[#aaa]">DVR Buffer:</span> {formatTime(dvrTotal)}
                         </div>
                       </>
                     )}
                   </div>
                 )}
               </div>
+
+              {/* Theater Mode (only when not fullscreen) */}
+              {!fullscreen && (
+                <button
+                  onClick={toggleTheater}
+                  className="text-white/70 hover:text-white transition-colors p-1 flex-shrink-0"
+                  aria-label="Theater mode"
+                >
+                  <svg className="w-5 h-5 sm:w-6 sm:h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                </button>
+              )}
 
               {/* Fullscreen */}
               <button
@@ -794,20 +909,23 @@ const ViewerPage: React.FC<ViewerPageProps> = ({ streamId }) => {
           </div>
         </div>
 
-        {/* Unmute banner — shown on any device when muted after autoplay */}
+        {/* Unmute banner — shown when muted */}
         {hasVideo && muted && (
           <div
-            className="absolute top-14 right-3 flex items-center gap-2 px-3 py-1.5 bg-black/75 backdrop-blur-sm rounded-full cursor-pointer z-10 select-none"
+            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-3 z-10"
             onClick={toggleMute}
           >
-            <svg className="w-4 h-4 text-white flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06A8.99 8.99 0 0017.73 19.73L19 21 20.27 19.73 5.54 5 4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
-            </svg>
-            <span className="text-white text-sm font-medium">Click to unmute</span>
+            <div className="w-16 h-16 bg-black/70 rounded-full flex items-center justify-center cursor-pointer hover:bg-black/80 transition-colors backdrop-blur-sm">
+              <svg className="w-8 h-8 text-white" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06A8.99 8.99 0 0017.73 19.73L19 21 20.27 19.73 5.54 5 4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+              </svg>
+            </div>
+            <span className="text-white text-sm font-medium bg-black/60 px-4 py-2 rounded-full backdrop-blur-sm">Click to unmute</span>
           </div>
         )}
       </div>
     </div>
+    </>
   );
 };
 
