@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { StreamMode, Resolution } from '../types';
+import { StreamMode, VideoDevice, AudioDevice, Resolution } from '../types';
 
 declare const Peer: any;
 
@@ -8,523 +8,690 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:80',              username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443',             username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:a.relay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:a.relay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
 const RESOLUTIONS: Resolution[] = [
-  { width: 426,  height: 240,  label: '240p',       frameRate: 30 },
-  { width: 640,  height: 360,  label: '360p',       frameRate: 30 },
-  { width: 854,  height: 480,  label: '480p',       frameRate: 30 },
-  { width: 1280, height: 720,  label: '720p HD',    frameRate: 30 },
-  { width: 1280, height: 720,  label: '720p 60fps', frameRate: 60 },
-  { width: 1920, height: 1080, label: '1080p FHD',  frameRate: 30 },
+  { width: 426, height: 240, label: '240p' },
+  { width: 640, height: 360, label: '360p' },
+  { width: 854, height: 480, label: '480p' },
+  { width: 1280, height: 720, label: '720p HD' },
+  { width: 1920, height: 1080, label: '1080p Full HD' },
 ];
 
-interface ViewerInfo { id: string; joinedAt: number; callState: string; }
-
 const AdminPanel: React.FC = () => {
-  const [mode, setMode]             = useState<StreamMode>(StreamMode.IDLE);
   const [streamTitle, setStreamTitle] = useState('My Live Stream');
-  const [editTitle, setEditTitle]   = useState(false);
-  const [streamUrl, setStreamUrl]   = useState('');
-  const [copied, setCopied]         = useState(false);
-  const [error, setError]           = useState('');
-  const [activeTab, setActiveTab]   = useState<'source'|'settings'|'viewers'>('source');
+  const [mode, setMode] = useState<StreamMode>(StreamMode.IDLE);
+  const [streamUrl, setStreamUrl] = useState('');
+  const [streamId, setStreamId] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState('');
+  const [peerStatus, setPeerStatus] = useState<'idle' | 'connecting' | 'ready' | 'error'>('idle');
 
-  const [videoDevices, setVideoDevices] = useState<{deviceId:string;label:string}[]>([]);
-  const [audioDevices, setAudioDevices] = useState<{deviceId:string;label:string}[]>([]);
-  const [selectedVideo, setSelectedVideo] = useState('');
-  const [selectedAudio, setSelectedAudio] = useState('');
-  const [selectedRes, setSelectedRes] = useState<Resolution>(RESOLUTIONS[3]);
+  const [videoDevices, setVideoDevices] = useState<VideoDevice[]>([]);
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [selectedVideoDevice, setSelectedVideoDevice] = useState('');
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
+  const [selectedResolution, setSelectedResolution] = useState<Resolution>(RESOLUTIONS[2]);
+  const [showDeviceMenu, setShowDeviceMenu] = useState(false);
 
+  const [viewers, setViewers] = useState<Map<string, { id: string; joinedAt: number }>>(new Map());
+  const [isFileUploading, setIsFileUploading] = useState(false);
+  const [uploadFileName, setUploadFileName] = useState('');
   const [streamDuration, setStreamDuration] = useState(0);
-  const [hasAudio, setHasAudio]   = useState(false);
-  const [micOn, setMicOn]         = useState(true);
-  const [camOn, setCamOn]         = useState(true);
-  const [uploadName, setUploadName] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [peakLevel, setPeakLevel] = useState(0);
-  const [peerStatus, setPeerStatus] = useState<'idle'|'connecting'|'ready'|'error'>('idle');
-  const [viewers, setViewers]     = useState<Map<string, ViewerInfo>>(new Map());
+  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
 
-  const videoRef      = useRef<HTMLVideoElement>(null);
-  const streamRef     = useRef<MediaStream | null>(null);
-  const peerRef       = useRef<any>(null);
-  const callsRef      = useRef<Map<string, any>>(new Map());
-  const fileVideoRef  = useRef<HTMLVideoElement | null>(null);
-  const fileInputRef  = useRef<HTMLInputElement>(null);
-  const durationRef   = useRef<number | null>(null);
-  const startTimeRef  = useRef(0);
-  const audioCtxRef   = useRef<AudioContext | null>(null);
-  const audioAnimRef  = useRef<number | null>(null);
-  const peakDecayRef  = useRef(0);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const peerRef = useRef<any>(null);
+  const callsRef = useRef<Map<string, any>>(new Map());
+  const fileVideoRef = useRef<HTMLVideoElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const durationTimer = useRef<number | null>(null);
+  const startTimeRef = useRef<number>(0);
 
-  // ── Devices ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    const load = async () => {
+    const loadDevices = async () => {
       try {
-        await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-          .then(s => s.getTracks().forEach(t => t.stop())).catch(() => {});
-        const devs = await navigator.mediaDevices.enumerateDevices();
-        const v = devs.filter(d => d.kind === 'videoinput').map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Camera ${i+1}` }));
-        const a = devs.filter(d => d.kind === 'audioinput').map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Mic ${i+1}` }));
-        setVideoDevices(v); setAudioDevices(a);
-        if (v.length) setSelectedVideo(x => x || v[0].deviceId);
-        if (a.length) setSelectedAudio(x => x || a[0].deviceId);
-      } catch {}
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const vids = devices.filter(d => d.kind === 'videoinput').map((d, i) => ({ 
+          deviceId: d.deviceId, 
+          label: d.label || `Camera ${i + 1}` 
+        }));
+        const auds = devices.filter(d => d.kind === 'audioinput').map((d, i) => ({ 
+          deviceId: d.deviceId, 
+          label: d.label || `Microphone ${i + 1}` 
+        }));
+        setVideoDevices(vids);
+        setAudioDevices(auds);
+        if (vids.length > 0) setSelectedVideoDevice(prev => prev || vids[0].deviceId);
+        if (auds.length > 0) setSelectedAudioDevice(prev => prev || auds[0].deviceId);
+      } catch (e) { console.warn('Device enum:', e); }
     };
-    navigator.mediaDevices.addEventListener('devicechange', load);
-    load();
-    return () => navigator.mediaDevices.removeEventListener('devicechange', load);
+    
+    navigator.mediaDevices.addEventListener('devicechange', loadDevices);
+    loadDevices();
+    return () => navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
   }, []);
 
-  // ── Duration ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (mode !== StreamMode.IDLE) {
       startTimeRef.current = Date.now();
-      durationRef.current = window.setInterval(() =>
+      durationTimer.current = window.setInterval(() => 
         setStreamDuration(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
     } else {
-      if (durationRef.current) clearInterval(durationRef.current);
+      if (durationTimer.current) clearInterval(durationTimer.current);
       setStreamDuration(0);
     }
-    return () => { if (durationRef.current) clearInterval(durationRef.current); };
+    return () => { if (durationTimer.current) clearInterval(durationTimer.current); };
   }, [mode]);
 
-  // ── Audio meter ───────────────────────────────────────────────────────────
-  const startMeter = useCallback((stream: MediaStream) => {
-    if (!stream.getAudioTracks().length) return;
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioCtxRef.current = ctx;
-      const src = ctx.createMediaStreamSource(stream);
-      const an = ctx.createAnalyser(); an.fftSize = 256; an.smoothingTimeConstant = 0.8;
-      src.connect(an);
-      const buf = new Uint8Array(an.frequencyBinCount);
-      const tick = () => {
-        an.getByteFrequencyData(buf);
-        const avg = buf.reduce((a, b) => a + b, 0) / buf.length / 255;
-        setAudioLevel(avg);
-        if (avg > peakDecayRef.current) { peakDecayRef.current = avg; setPeakLevel(avg); }
-        else { peakDecayRef.current = Math.max(0, peakDecayRef.current - 0.003); setPeakLevel(peakDecayRef.current); }
-        audioAnimRef.current = requestAnimationFrame(tick);
-      };
-      audioAnimRef.current = requestAnimationFrame(tick);
-    } catch {}
-  }, []);
-
-  const stopMeter = useCallback(() => {
-    if (audioAnimRef.current) { cancelAnimationFrame(audioAnimRef.current); audioAnimRef.current = null; }
-    if (audioCtxRef.current) { audioCtxRef.current.close(); audioCtxRef.current = null; }
-    setAudioLevel(0); setPeakLevel(0); peakDecayRef.current = 0;
-  }, []);
-
-  // ── Peer ─────────────────────────────────────────────────────────────────
   const destroyPeer = useCallback(() => {
-    callsRef.current.forEach(c => { try { c.close(); } catch {} });
+    callsRef.current.forEach(call => { try { call.close(); } catch {} });
     callsRef.current.clear();
-    if (peerRef.current) { try { peerRef.current.destroy(); } catch {} peerRef.current = null; }
-    setViewers(new Map()); setPeerStatus('idle');
-  }, []);
-
-  /**
-   * KEY FIX: Admin calls the viewer — not the other way around.
-   * This is the correct WebRTC broadcast pattern.
-   */
-  const callViewer = useCallback((viewerPeerId: string, stream: MediaStream) => {
-    if (!peerRef.current || peerRef.current.destroyed) return;
-    try {
-      console.log('[Admin] Calling viewer:', viewerPeerId);
-      const call = peerRef.current.call(viewerPeerId, stream);
-      if (!call) { console.warn('[Admin] call() returned null'); return; }
-
-      callsRef.current.set(viewerPeerId, call);
-      setViewers(prev => new Map(prev).set(viewerPeerId, { id: viewerPeerId, joinedAt: Date.now(), callState: 'connecting' }));
-
-      call.peerConnection?.addEventListener('connectionstatechange', () => {
-        const state = call.peerConnection?.connectionState ?? 'unknown';
-        setViewers(prev => { const n = new Map(prev); const v = n.get(viewerPeerId); if (v) n.set(viewerPeerId, { ...v, callState: state }); return n; });
-      });
-
-      call.on('close', () => {
-        callsRef.current.delete(viewerPeerId);
-        setViewers(prev => { const n = new Map(prev); n.delete(viewerPeerId); return n; });
-      });
-      call.on('error', () => {
-        callsRef.current.delete(viewerPeerId);
-        setViewers(prev => { const n = new Map(prev); n.delete(viewerPeerId); return n; });
-      });
-    } catch (e) { console.error('[Admin] callViewer error:', e); }
+    setViewers(new Map());
+    if (peerRef.current) {
+      try { peerRef.current.destroy(); } catch {}
+      peerRef.current = null;
+    }
+    setPeerStatus('idle');
   }, []);
 
   const createPeer = useCallback((id: string, stream: MediaStream) => {
     destroyPeer();
     setPeerStatus('connecting');
-    const peer = new Peer(`${PEER_PREFIX}${id}`, {
-      config: { iceServers: ICE_SERVERS, iceTransportPolicy: 'all', iceCandidatePoolSize: 10 },
-      debug: 0,
-    });
-    peerRef.current = peer;
+    const peerId = `${PEER_PREFIX}${id}`;
 
-    peer.on('open', () => { setPeerStatus('ready'); console.log('[Admin] Peer ready'); });
+    const peer = new Peer(peerId, { config: { iceServers: ICE_SERVERS } });
 
-    // Viewer connects via data channel to register → we call them back with stream
-    peer.on('connection', (conn: any) => {
-      console.log('[Admin] Viewer registering via data channel:', conn.peer);
-      conn.on('open', () => {
-        if (streamRef.current) callViewer(conn.peer, streamRef.current);
+    peer.on('open', () => setPeerStatus('ready'));
+    peer.on('call', (call: any) => {
+      call.answer(stream);
+      setViewers(prev => { 
+        const n = new Map(prev); 
+        n.set(call.peer, { id: call.peer, joinedAt: Date.now() }); 
+        return n; 
+      });
+      callsRef.current.set(call.peer, call);
+      
+      call.on('close', () => {
+        setViewers(prev => { const n = new Map(prev); n.delete(call.peer); return n; });
+        callsRef.current.delete(call.peer);
       });
     });
 
     peer.on('error', (err: any) => {
-      console.error('[Admin] Peer error:', err.type);
       if (err.type === 'unavailable-id') {
-        const newId = genId();
-        setStreamUrl(`${window.location.origin}${window.location.pathname}#/viewer/${newId}`);
-        setTimeout(() => { if (streamRef.current) createPeer(newId, streamRef.current); }, 500);
+        setError('Stream ID conflict. Please restart.');
       } else if (err.type !== 'peer-unavailable') {
-        setPeerStatus('error'); setError(`Connection error: ${err.type}`);
+        setError(`Signaling error: ${err.type}`);
+        setPeerStatus('error');
       }
     });
 
-    peer.on('disconnected', () => { setPeerStatus('connecting'); try { peer.reconnect(); } catch {} });
-  }, [destroyPeer, callViewer]);
+    peer.on('disconnected', () => {
+      setPeerStatus('connecting');
+      try { peer.reconnect(); } catch {}
+    });
 
-  // ── Stream setup ──────────────────────────────────────────────────────────
+    peerRef.current = peer;
+  }, [destroyPeer]);
+
   const setupStream = useCallback(async (stream: MediaStream, newMode: StreamMode, id: string) => {
     streamRef.current = stream;
-    const gotAudio = stream.getAudioTracks().length > 0;
-    setHasAudio(gotAudio);
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
-      videoRef.current.muted = true;
+      videoRef.current.muted = true; // Always mute preview to prevent feedback
       try { await videoRef.current.play(); } catch {}
     }
-    if (gotAudio) startMeter(stream);
     setMode(newMode);
+    setStreamId(id);
     setStreamUrl(`${window.location.origin}${window.location.pathname}#/viewer/${id}`);
-    setMicOn(true); setCamOn(true);
     createPeer(id, stream);
-  }, [createPeer, startMeter]);
+  }, [createPeer]);
 
-  const genId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const generateId = () => `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
 
   const startCamera = async () => {
     try {
       setError('');
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: selectedVideo ? { deviceId: { exact: selectedVideo }, width: { ideal: selectedRes.width }, height: { ideal: selectedRes.height }, frameRate: { ideal: selectedRes.frameRate ?? 30 } }
-          : { width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: selectedAudio ? { deviceId: { exact: selectedAudio }, echoCancellation: true, noiseSuppression: true }
+      const constraints: MediaStreamConstraints = {
+        video: selectedVideoDevice
+          ? { deviceId: { exact: selectedVideoDevice }, width: { ideal: selectedResolution.width }, height: { ideal: selectedResolution.height } }
+          : { width: { ideal: selectedResolution.width }, height: { ideal: selectedResolution.height } },
+        audio: selectedAudioDevice
+          ? { deviceId: { exact: selectedAudioDevice }, echoCancellation: true, noiseSuppression: true }
           : { echoCancellation: true, noiseSuppression: true },
-      });
-      await setupStream(stream, StreamMode.LIVE, genId());
+      };
+      
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      await setupStream(stream, StreamMode.LIVE, generateId());
     } catch (e: any) {
-      setError(e.name === 'NotAllowedError' ? 'Permission denied. Allow camera/mic in browser settings.' : e.message || 'Camera failed');
+      setError(e.message || 'Camera access failed');
     }
   };
 
   const startScreen = async () => {
     try {
       setError('');
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      const display = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30 } }, audio: true });
-      try {
-        const mic = await navigator.mediaDevices.getUserMedia({ audio: selectedAudio ? { deviceId: { exact: selectedAudio } } : true });
-        mic.getAudioTracks().forEach(t => display.addTrack(t));
-      } catch {}
-      display.getVideoTracks()[0].addEventListener('ended', () => stopStream());
-      await setupStream(display, StreamMode.SCREEN, genId());
-    } catch (e: any) { if (e.name !== 'NotAllowedError') setError('Screen share failed.'); }
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      stream.getVideoTracks()[0].addEventListener('ended', () => stopStream());
+      await setupStream(stream, StreamMode.SCREEN, generateId());
+    } catch (e: any) {
+      if (e.name !== 'NotAllowedError') setError('Screen share cancelled');
+    }
   };
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; if (!file) return;
-    setUploading(true); setUploadName(file.name);
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setIsFileUploading(true);
+    setUploadFileName(file.name);
+    
     try {
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      const url = URL.createObjectURL(file);
-      const vid = Object.assign(document.createElement('video'), { src: url, loop: true, muted: false, playsInline: true, crossOrigin: 'anonymous' });
-      await new Promise((res, rej) => { vid.onloadedmetadata = res; vid.onerror = rej; setTimeout(() => rej(new Error('Timeout')), 15000); });
-      await vid.play();
-      // @ts-ignore
-      const stream = vid.captureStream(30);
-      fileVideoRef.current = vid;
-      await setupStream(stream, StreamMode.FILE_UPLOAD, genId());
-    } catch (err: any) { setError(`File error: ${err.message}`); }
-    finally { setUploading(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      
+      const videoUrl = URL.createObjectURL(file);
+      const video = document.createElement('video');
+      video.src = videoUrl;
+      video.loop = true;
+      video.muted = false; // Keep audio for streaming
+      video.playsInline = true;
+      video.crossOrigin = 'anonymous';
+      
+      await new Promise((resolve, reject) => {
+        video.onloadedmetadata = resolve;
+        video.onerror = reject;
+        setTimeout(() => reject(new Error('Load timeout')), 10000);
+      });
+      
+      await video.play();
+      
+      // @ts-ignore - captureStream exists in modern browsers
+      const stream = video.captureStream(30);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true; // Mute preview only
+        await videoRef.current.play();
+      }
+      
+      fileVideoRef.current = video;
+      await setupStream(stream, StreamMode.FILE_UPLOAD, generateId());
+    } catch (err: any) {
+      setError(`Upload failed: ${err.message}`);
+    } finally {
+      setIsFileUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   const stopStream = useCallback(() => {
-    stopMeter(); destroyPeer();
-    streamRef.current?.getTracks().forEach(t => t.stop()); streamRef.current = null;
-    if (fileVideoRef.current) { fileVideoRef.current.pause(); URL.revokeObjectURL(fileVideoRef.current.src); fileVideoRef.current = null; }
-    if (videoRef.current) { videoRef.current.pause(); videoRef.current.srcObject = null; }
-    setMode(StreamMode.IDLE); setStreamUrl(''); setUploadName(''); setHasAudio(false); setMicOn(true); setCamOn(true);
-  }, [destroyPeer, stopMeter]);
+    destroyPeer();
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    if (fileVideoRef.current) {
+      fileVideoRef.current.pause();
+      fileVideoRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+    setMode(StreamMode.IDLE);
+    setStreamUrl('');
+    setStreamId('');
+    setUploadFileName('');
+  }, [destroyPeer]);
 
-  const toggleMic = () => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !micOn; }); setMicOn(p => !p); };
-  const toggleCam = () => { streamRef.current?.getVideoTracks().forEach(t => { t.enabled = !camOn; }); setCamOn(p => !p); };
+  const togglePreviewAudio = () => {
+    if (videoRef.current) {
+      videoRef.current.muted = !videoRef.current.muted;
+      setIsAudioEnabled(!videoRef.current.muted);
+    }
+  };
 
-  const fmt = (s: number) => { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60; return h ? `${h}:${p2(m)}:${p2(sec)}` : `${p2(m)}:${p2(sec)}`; };
-  const p2 = (n: number) => n.toString().padStart(2, '0');
-  const copyLink = () => { navigator.clipboard.writeText(streamUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2500); }); };
+  const formatDuration = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return h > 0 ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
   const isLive = mode !== StreamMode.IDLE;
-  const BARS = 24;
 
   return (
-    <div className="min-h-screen bg-[#0f0f0f] text-white flex flex-col" style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
-
+    <div className="min-h-screen bg-white">
       {/* Header */}
-      <header className="h-12 border-b border-white/10 bg-[#111] flex items-center px-4 gap-4 flex-shrink-0 z-10">
-        <button onClick={() => window.location.hash = '#/'} className="flex items-center gap-2 hover:opacity-75 transition-opacity">
-          <div className="w-7 h-7 bg-red-600 rounded-lg flex items-center justify-center flex-shrink-0">
-            <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 8l-6 4V7l6 4z"/>
-            </svg>
-          </div>
-          <span className="font-bold text-sm hidden sm:block">StreamStudio</span>
-        </button>
-        <span className="text-white/20 hidden sm:block">|</span>
-        {editTitle
-          ? <input autoFocus value={streamTitle} onChange={e => setStreamTitle(e.target.value)} onBlur={() => setEditTitle(false)} onKeyDown={e => e.key === 'Enter' && setEditTitle(false)} className="hidden sm:block bg-white/10 border border-white/20 rounded px-2 py-0.5 text-sm outline-none w-44"/>
-          : <button onClick={() => setEditTitle(true)} className="hidden sm:flex items-center gap-1.5 text-sm text-white/60 hover:text-white transition-colors">
-              {streamTitle}
-              <svg className="w-3 h-3 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4z" strokeLinecap="round" strokeLinejoin="round"/></svg>
+      <header className="border-b border-gray-200 bg-white/80 backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-4 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => window.location.hash = '#/'} 
+              className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+            >
+              <div className="w-8 h-8 bg-gray-900 rounded-full flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <span className="font-semibold text-gray-900 hidden sm:inline">StreamStudios</span>
             </button>
-        }
-        <div className="flex items-center gap-2 ml-auto">
-          {isLive && <>
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-white/5 rounded-full border border-white/10 text-xs text-white/50">
-              <span className="w-1.5 h-1.5 bg-red-500 rounded-full live-dot"/> {fmt(streamDuration)}
-            </div>
-            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-white/5 rounded-full border border-white/10 text-xs text-white/50">
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
-              {viewers.size}
-            </div>
-            <span className={`px-2 py-1 rounded-full text-xs font-mono ${peerStatus === 'ready' ? 'text-green-400 bg-green-400/10' : peerStatus === 'connecting' ? 'text-yellow-400 bg-yellow-400/10' : 'text-red-400 bg-red-400/10'}`}>
-              {peerStatus === 'ready' ? '● Ready' : peerStatus === 'connecting' ? '◌ Connecting…' : '✕ Error'}
-            </span>
-            <button onClick={stopStream} className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-full transition-colors">End</button>
-          </>}
+            
+            {isLive && (
+              <div className="flex items-center gap-2">
+                <span className="flex items-center gap-1.5 px-2 py-1 bg-red-50 rounded-md">
+                  <span className="w-2 h-2 bg-red-500 rounded-full live-dot" />
+                  <span className="text-red-600 text-xs font-medium">LIVE</span>
+                </span>
+                <span className="text-gray-400 text-xs font-mono">{formatDuration(streamDuration)}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {isLive && (
+              <>
+                <span className="text-sm text-gray-600 hidden sm:block">
+                  {viewers.size} viewer{viewers.size !== 1 ? 's' : ''}
+                </span>
+                <button
+                  onClick={stopStream}
+                  className="px-4 py-1.5 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-lg transition-colors"
+                >
+                  End
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* Body */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-
-        {/* Preview */}
-        <div className="flex-1 flex flex-col gap-4 p-4 min-w-0">
-
-          {/* Video */}
-          <div className="relative rounded-xl overflow-hidden border border-white/10 bg-black" style={{ aspectRatio: '16/9' }}>
-            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain"/>
-            {!isLive && !uploading && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#0a0a0a]">
-                <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center">
-                  <svg className="w-7 h-7 text-white/15" viewBox="0 0 24 24" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 8l-6 4V7l6 4z"/></svg>
-                </div>
-                <p className="text-white/25 text-sm">Select a source to go live</p>
-              </div>
-            )}
-            {uploading && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80">
-                <div className="w-10 h-10 border-2 border-white/20 border-t-white rounded-full spin"/>
-                <p className="text-white/60 text-sm truncate max-w-xs">Loading {uploadName}…</p>
-              </div>
-            )}
-            {isLive && (
-              <div className="absolute top-3 left-3 flex items-center gap-2 flex-wrap">
-                <span className="flex items-center gap-1.5 px-2.5 py-1 bg-red-600 rounded-md">
-                  <span className="w-1.5 h-1.5 bg-white rounded-full live-dot"/>
-                  <span className="text-white text-xs font-bold tracking-wider">LIVE</span>
-                </span>
-                <span className="px-2 py-1 bg-black/70 backdrop-blur-sm rounded-md text-xs text-white/80">
-                  {mode === StreamMode.LIVE ? 'Camera' : mode === StreamMode.SCREEN ? 'Screen' : uploadName || 'File'}
-                </span>
-                {!micOn && <span className="px-2 py-1 bg-red-600/80 rounded-md text-xs text-white">Mic Off</span>}
-                {!camOn && <span className="px-2 py-1 bg-red-600/80 rounded-md text-xs text-white">Cam Off</span>}
-              </div>
-            )}
-          </div>
-
-          {/* Audio meter + controls */}
-          {isLive && (
-            <div className="bg-[#181818] border border-white/10 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-white/40 uppercase tracking-wider">Audio</span>
-                {!hasAudio && <span className="text-xs text-yellow-500">No audio track</span>}
-              </div>
-              <div className="flex items-end gap-0.5 h-7">
-                {Array.from({ length: BARS }).map((_, i) => {
-                  const thr = i / BARS;
-                  const active = audioLevel > thr;
-                  const isPeak = Math.abs(peakLevel - thr) < 1/BARS;
-                  return <div key={i} className={`flex-1 rounded-sm transition-all duration-75 ${active ? i > BARS*0.88 ? 'bg-red-500' : i > BARS*0.7 ? 'bg-yellow-400' : 'bg-green-500' : isPeak ? 'bg-white/50' : 'bg-white/8'}`} style={{ height: active ? `${Math.max(20, 20 + (i/BARS)*80)}%` : '15%' }}/>;
-                })}
-              </div>
-              <div className="flex gap-2 pt-1 border-t border-white/10">
-                <button onClick={toggleMic} className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${micOn ? 'bg-white/8 text-white hover:bg-white/12' : 'bg-red-600/20 text-red-400 border border-red-600/30'}`}>
-                  {micOn ? '🎤' : '🔇'} {micOn ? 'Mic On' : 'Mic Off'}
-                </button>
-                <button onClick={toggleCam} className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${camOn ? 'bg-white/8 text-white hover:bg-white/12' : 'bg-red-600/20 text-red-400 border border-red-600/30'}`}>
-                  {camOn ? '📷' : '🚫'} {camOn ? 'Cam On' : 'Cam Off'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Stream link */}
-          {streamUrl && (
-            <div className="bg-[#181818] border border-white/10 rounded-xl p-4">
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-xs font-semibold text-white/40 uppercase tracking-wider">Viewer Link</p>
-                <span className="text-xs text-green-400 flex items-center gap-1"><span className="w-1.5 h-1.5 bg-green-500 rounded-full"/>Active</span>
-              </div>
-              <div className="flex items-center gap-2 bg-black/40 border border-white/10 rounded-lg px-3 py-2.5 mb-3">
-                <span className="flex-1 text-xs text-white/60 font-mono truncate">{streamUrl}</span>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={copyLink} className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-semibold transition-all ${copied ? 'bg-green-600/20 text-green-400 border border-green-600/30' : 'bg-white/8 text-white hover:bg-white/12'}`}>
-                  {copied ? '✓ Copied!' : '📋 Copy Link'}
-                </button>
-                <button onClick={() => window.open(streamUrl, '_blank')} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold transition-colors">
-                  ↗ Open Viewer
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Error */}
-          {error && (
-            <div className="bg-red-900/20 border border-red-800/40 rounded-xl p-4 flex items-start gap-3">
-              <p className="text-sm text-red-400 flex-1">{error}</p>
-              <button onClick={() => setError('')} className="text-red-400/60 hover:text-red-400 text-lg leading-none">×</button>
-            </div>
-          )}
-        </div>
-
-        {/* Sidebar */}
-        <div className="w-full lg:w-72 xl:w-80 border-t lg:border-t-0 lg:border-l border-white/10 bg-[#141414] flex flex-col flex-shrink-0">
-          <div className="flex border-b border-white/10 flex-shrink-0">
-            {(['source', 'settings', 'viewers'] as const).map(t => (
-              <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors relative ${activeTab === t ? 'text-white' : 'text-white/30 hover:text-white/60'}`}>
-                {t === 'viewers' && viewers.size > 0 && <span className="absolute top-2 right-2 w-4 h-4 bg-red-600 rounded-full text-[10px] flex items-center justify-center">{viewers.size}</span>}
-                {t}
-                {activeTab === t && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600 rounded-full"/>}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
-
-            {/* SOURCE */}
-            {activeTab === 'source' && <>
-              <p className="text-xs font-bold text-white/30 uppercase tracking-wider">Broadcast Source</p>
-              <div className="space-y-2">
-                {[
-                  { label: 'Camera', sub: `Webcam · ${selectedRes.label}`, icon: '📷', active: mode === StreamMode.LIVE, color: 'blue', onClick: startCamera },
-                  { label: 'Screen Share', sub: 'Display + mic audio', icon: '🖥️', active: mode === StreamMode.SCREEN, color: 'green', onClick: startScreen },
-                ].map(item => (
-                  <button key={item.label} onClick={item.onClick} disabled={uploading}
-                    className={`w-full flex items-center gap-3 p-3.5 rounded-xl border transition-all text-left ${item.active ? `border-${item.color}-500 bg-${item.color}-500/10` : 'border-white/10 bg-white/5 hover:bg-white/8 hover:border-white/20'} ${uploading ? 'opacity-40 cursor-not-allowed' : ''}`}>
-                    <span className="text-2xl">{item.icon}</span>
-                    <div>
-                      <p className="text-sm font-semibold text-white">{item.label}</p>
-                      <p className="text-xs text-white/40">{item.sub}</p>
+      <div className="max-w-7xl mx-auto px-2 sm:px-2 py-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Main Content - 2/3 width on desktop */}
+          <div className="lg:col-span-2 space-y-4">
+            {/* Video Preview */}
+            <div className="bg-gray-50 rounded-xl overflow-hidden border border-gray-200">
+              <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted={isAudioEnabled}
+                  className="w-full h-full object-contain"
+                />
+                
+                {!isLive && !isFileUploading && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+                    <div className="text-center">
+                      <div className="w-16 h-16 mx-auto mb-3 rounded-2xl bg-gray-800 flex items-center justify-center">
+                        <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      </div>
+                      <p className="text-gray-400 text-sm">Select a source to start broadcasting</p>
                     </div>
-                    {item.active && <div className="ml-auto w-2 h-2 bg-green-500 rounded-full live-dot"/>}
-                  </button>
-                ))}
-
-                <label className={`w-full flex items-center gap-3 p-3.5 rounded-xl border transition-all cursor-pointer ${mode === StreamMode.FILE_UPLOAD ? 'border-purple-500 bg-purple-500/10' : 'border-white/10 bg-white/5 hover:bg-white/8 hover:border-white/20'} ${uploading ? 'opacity-40 cursor-not-allowed' : ''}`}>
-                  <span className="text-2xl">{uploading ? '⏳' : '📁'}</span>
-                  <div>
-                    <p className="text-sm font-semibold text-white">Upload Video</p>
-                    <p className="text-xs text-white/40">{uploadName || 'MP4, WebM, MOV'}</p>
                   </div>
-                  {mode === StreamMode.FILE_UPLOAD && <div className="ml-auto w-2 h-2 bg-purple-500 rounded-full live-dot"/>}
-                  <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={handleFile} disabled={uploading}/>
+                )}
+
+                {isFileUploading && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-gray-900/90">
+                    <div className="text-center">
+                      <div className="w-10 h-10 border-2 border-gray-600 border-t-blue-500 rounded-full spin mx-auto mb-3" />
+                      <p className="text-gray-300 text-sm">Preparing stream...</p>
+                      <p className="text-gray-500 text-xs mt-1">{uploadFileName}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Editable stream title overlay */}
+                <div className="absolute bottom-3 left-3 right-3">
+                  <input
+                    type="text"
+                    value={streamTitle}
+                    onChange={e => setStreamTitle(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-medium text-white bg-black/50 backdrop-blur-sm rounded-lg outline-none focus:bg-black/75 transition-colors"
+                    placeholder="Enter stream title..."
+                  />
+                </div>
+
+                {isLive && (
+                  <>
+                    <div className="absolute top-3 left-3 flex items-center gap-2">
+                      <span className="flex items-center gap-1.5 px-2 py-1 bg-red-500 rounded-md">
+                        <span className="w-1.5 h-1.5 bg-white rounded-full live-dot" />
+                        <span className="text-white text-xs font-medium">LIVE</span>
+                      </span>
+                      <span className="px-2 py-1 bg-gray-900/75 backdrop-blur-sm rounded-md text-xs text-gray-300">
+                        {mode === StreamMode.LIVE ? 'Camera' : mode === StreamMode.SCREEN ? 'Screen' : 'File'}
+                      </span>
+                    </div>
+
+                    {/* Audio toggle for preview only */}
+                    <button
+                      onClick={togglePreviewAudio}
+                      className="absolute top-3 right-3 p-2 bg-gray-900/75 backdrop-blur-sm rounded-lg hover:bg-gray-900 transition-colors"
+                      title={isAudioEnabled ? 'Preview audio muted' : 'Preview audio enabled'}
+                    >
+                      {isAudioEnabled ? (
+                        <svg className="w-4 h-4 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                        </svg>
+                      ) : (
+                        <svg className="w-4 h-4 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                        </svg>
+                      )}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Stream Link */}
+            <div className="bg-white border border-gray-200 rounded-xl p-2">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+                Viewer Link
+              </p>
+              
+              {streamUrl ? (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5">
+                    <svg className="w-4 h-4 text-gray-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                    </svg>
+                    <span className="flex-1 text-xs text-gray-600 font-mono truncate">{streamUrl}</span>
+                  </div>
+                  
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(streamUrl);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      }}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        copied 
+                          ? 'bg-green-50 text-green-600 border border-green-200' 
+                          : 'bg-gray-50 text-gray-700 border border-gray-200 hover:bg-gray-100'
+                      }`}
+                    >
+                      {copied ? (
+                        <>
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                          Copy Link
+                        </>
+                      )}
+                    </button>
+                    
+                    <button
+                      onClick={() => window.open(streamUrl, '_blank')}
+                      className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                      Open Viewer
+                    </button>
+                  </div>
+                  
+                  <p className="text-xs text-gray-400">
+                    Share this link with viewers. Each stream has a unique URL.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center h-16 border border-dashed border-gray-200 rounded-lg">
+                  <p className="text-sm text-gray-400">Start a broadcast to generate your link</p>
+                </div>
+              )}
+            </div>
+
+            {/* Viewers List */}
+            {isLive && (
+              <div className="bg-white border border-gray-200 rounded-xl p-2">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Live Viewers
+                  </p>
+                  <span className="text-xs font-medium bg-gray-100 px-2 py-0.5 rounded-full">
+                    {viewers.size}
+                  </span>
+                </div>
+                
+                {viewers.size === 0 ? (
+                  <p className="text-sm text-gray-400">No viewers yet — share your link!</p>
+                ) : (
+                  <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
+                    {Array.from(viewers.values()).map((viewer, i) => (
+                      <div key={viewer.id} className="flex items-center gap-3 px-3 py-2 bg-gray-50 rounded-lg">
+                        <span className="w-2 h-2 bg-green-500 rounded-full" />
+                        <span className="text-sm text-gray-700 font-medium">Viewer {i + 1}</span>
+                        <span className="text-xs text-gray-400 font-mono ml-auto">
+                          {viewer.id.replace(PEER_PREFIX, '').slice(0, 8)}…
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Sidebar - 1/3 width on desktop */}
+          <div className="space-y-2">
+            {/* Source Selection */}
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+                Broadcast Source
+              </p>
+              
+              <div className="flex gap-2">
+                <button
+                  onClick={startCamera}
+                  disabled={isFileUploading}
+                  className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-lg border transition-all ${
+                    mode === StreamMode.LIVE
+                      ? 'border-blue-500 bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300 bg-white'
+                  } ${isFileUploading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <div className={`w-8 h-8 rounded-md flex items-center justify-center ${
+                    mode === StreamMode.LIVE ? 'bg-blue-500' : 'bg-gray-100'
+                  }`}>
+                    <svg className={`w-4 h-4 ${
+                      mode === StreamMode.LIVE ? 'text-white' : 'text-gray-600'
+                    }`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <span className="text-sm font-medium text-gray-900">Camera</span>
+                </button>
+
+                <button
+                  onClick={startScreen}
+                  disabled={isFileUploading}
+                  className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-lg border transition-all ${
+                    mode === StreamMode.SCREEN
+                      ? 'border-green-500 bg-green-50'
+                      : 'border-gray-200 hover:border-gray-300 bg-white'
+                  } ${isFileUploading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <div className={`w-8 h-8 rounded-md flex items-center justify-center ${
+                    mode === StreamMode.SCREEN ? 'bg-green-500' : 'bg-gray-100'
+                  }`}>
+                    <svg className={`w-4 h-4 ${
+                      mode === StreamMode.SCREEN ? 'text-white' : 'text-gray-600'
+                    }`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <span className="text-sm font-medium text-gray-900">Screen</span>
+                </button>
+
+                <label className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-lg border transition-all cursor-pointer ${
+                  mode === StreamMode.FILE_UPLOAD
+                    ? 'border-purple-500 bg-purple-50'
+                    : 'border-gray-200 hover:border-gray-300 bg-white'
+                } ${isFileUploading ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                  <div className={`w-8 h-8 rounded-md flex items-center justify-center ${
+                    mode === StreamMode.FILE_UPLOAD ? 'bg-purple-500' : 'bg-gray-100'
+                  }`}>
+                    {isFileUploading ? (
+                      <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full spin" />
+                    ) : (
+                      <svg className={`w-4 h-4 ${
+                        mode === StreamMode.FILE_UPLOAD ? 'text-white' : 'text-gray-600'
+                      }`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                    )}
+                  </div>
+                  <span className="text-sm font-medium text-gray-900">Upload</span>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="video/*"
+                    className="hidden"
+                    onChange={handleFile}
+                    disabled={isFileUploading}
+                  />
                 </label>
               </div>
 
               {isLive && (
-                <button onClick={stopStream} className="w-full py-2.5 bg-red-600/15 text-red-400 border border-red-600/25 rounded-xl text-sm font-semibold hover:bg-red-600/25 transition-colors">
-                  ⏹ End Stream
+                <button
+                  onClick={stopStream}
+                  className="w-full mt-3 py-2.5 bg-red-50 text-red-600 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-100 transition-colors"
+                >
+                  End Stream
                 </button>
               )}
-              {!isLive && (
-                <div className="p-4 bg-white/3 rounded-xl border border-white/8 space-y-2">
-                  {[['🔴','Click a source above to start broadcasting'],['🔗','Share the viewer link with your audience'],['🔒','Direct P2P — no upload, no cloud storage']].map(([icon, text]) => (
-                    <div key={text} className="flex items-start gap-2"><span>{icon}</span><p className="text-xs text-white/35 leading-relaxed">{text}</p></div>
-                  ))}
+            </div>
+
+            {/* Device Settings */}
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <button
+                onClick={() => setShowDeviceMenu(!showDeviceMenu)}
+                className="w-full flex items-center justify-between"
+              >
+                <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Device Settings
+                </span>
+                <svg
+                  className={`w-4 h-4 text-gray-400 transition-transform ${
+                    showDeviceMenu ? 'rotate-180' : ''
+                  }`}
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {showDeviceMenu && (
+                <div className="space-y-4 mt-4 pt-4 border-t border-gray-200">
+                  {videoDevices.length > 0 && (
+                    <div>
+                      <label className="block text-xs text-gray-600 mb-2 font-medium">Camera</label>
+                      <select
+                        value={selectedVideoDevice}
+                        onChange={e => setSelectedVideoDevice(e.target.value)}
+                        className="w-full p-3 text-sm bg-white border border-gray-300 rounded-lg text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all"
+                      >
+                        {videoDevices.map(d => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {audioDevices.length > 0 && (
+                    <div>
+                      <label className="block text-xs text-gray-600 mb-2 font-medium">Microphone</label>
+                      <select
+                        value={selectedAudioDevice}
+                        onChange={e => setSelectedAudioDevice(e.target.value)}
+                        className="w-full p-3 text-sm bg-white border border-gray-300 rounded-lg text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all"
+                      >
+                        {audioDevices.map(d => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-2 font-medium">Resolution</label>
+                    <select
+                      value={selectedResolution.width}
+                      onChange={e => {
+                        const res = RESOLUTIONS.find(r => r.width === Number(e.target.value));
+                        if (res) setSelectedResolution(res);
+                      }}
+                      className="w-full p-3 text-sm bg-white border border-gray-300 rounded-lg text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all"
+                    >
+                      {RESOLUTIONS.map(r => (
+                        <option key={r.width} value={r.width} selected={r.width === 1920}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               )}
-            </>}
+            </div>
 
-            {/* SETTINGS */}
-            {activeTab === 'settings' && <>
-              {videoDevices.length > 0 && <>
-                <label className="block text-xs font-bold text-white/30 uppercase tracking-wider mb-2">Camera</label>
-                <select value={selectedVideo} onChange={e => setSelectedVideo(e.target.value)} className="w-full p-3 text-sm bg-white/5 border border-white/10 rounded-xl text-white outline-none focus:border-white/30 mb-4">
-                  {videoDevices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}
-                </select>
-              </>}
-              {audioDevices.length > 0 && <>
-                <label className="block text-xs font-bold text-white/30 uppercase tracking-wider mb-2">Microphone</label>
-                <select value={selectedAudio} onChange={e => setSelectedAudio(e.target.value)} className="w-full p-3 text-sm bg-white/5 border border-white/10 rounded-xl text-white outline-none focus:border-white/30 mb-4">
-                  {audioDevices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}
-                </select>
-              </>}
-              <label className="block text-xs font-bold text-white/30 uppercase tracking-wider mb-2">Quality / Resolution</label>
-              <div className="space-y-1.5">
-                {RESOLUTIONS.map(r => (
-                  <button key={r.label} onClick={() => setSelectedRes(r)} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm transition-all ${selectedRes.label === r.label ? 'bg-white text-black font-bold' : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white border border-white/10'}`}>
-                    <span>{r.label}</span>
-                    <div className="flex gap-1">
-                      {r.frameRate === 60 && <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${selectedRes.label === r.label ? 'bg-blue-600 text-white' : 'bg-white/10 text-white/40'}`}>60fps</span>}
-                      {r.width >= 1920 && <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${selectedRes.label === r.label ? 'bg-purple-600 text-white' : 'bg-white/10 text-white/40'}`}>FHD</span>}
-                      {r.width >= 1280 && r.width < 1920 && <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${selectedRes.label === r.label ? 'bg-red-600 text-white' : 'bg-white/10 text-white/40'}`}>HD</span>}
-                    </div>
-                  </button>
-                ))}
+            {/* Info Card */}
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+                How it works
+              </p>
+              <div className="space-y-2.5">
+                <div className="flex items-start gap-2.5">
+                  <span className="text-sm">🌐</span>
+                  <p className="text-xs text-gray-600">Works across any device via WebRTC</p>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <span className="text-sm">🔒</span>
+                  <p className="text-xs text-gray-600">Peer-to-peer encrypted streaming</p>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <span className="text-sm">📱</span>
+                  <p className="text-xs text-gray-600">Viewers can watch on mobile or desktop</p>
+                </div>
               </div>
-              <div className="mt-4 p-3 bg-yellow-500/8 border border-yellow-500/15 rounded-xl">
-                <p className="text-xs text-yellow-500/80">Changes apply on next stream start.</p>
-              </div>
-            </>}
+            </div>
 
-            {/* VIEWERS */}
-            {activeTab === 'viewers' && <>
-              <div className="flex items-center justify-between">
-                <p className="text-xs font-bold text-white/30 uppercase tracking-wider">Live Viewers</p>
-                <span className="text-xs font-bold bg-white/8 px-2 py-0.5 rounded-full">{viewers.size}</span>
+            {/* Error Message */}
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+                <p className="text-sm text-red-600">{error}</p>
               </div>
-              {viewers.size === 0
-                ? <div className="flex flex-col items-center justify-center py-12 gap-2 text-center">
-                    <span className="text-4xl">👥</span>
-                    <p className="text-sm text-white/25">{isLive ? 'No viewers yet — share your link!' : 'Start streaming to see viewers'}</p>
-                  </div>
-                : <div className="space-y-2">
-                    {Array.from(viewers.values()).map((v, i) => (
-                      <div key={v.id} className="flex items-center gap-3 px-3 py-2.5 bg-white/5 rounded-xl border border-white/8">
-                        <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-xs font-bold text-white/60">{i+1}</div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-white font-medium">Viewer {i+1}</p>
-                          <p className="text-xs text-white/30 font-mono">{v.callState}</p>
-                        </div>
-                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${v.callState === 'connected' ? 'bg-green-500' : v.callState === 'connecting' ? 'bg-yellow-400 live-dot' : 'bg-red-400'}`}/>
-                      </div>
-                    ))}
-                  </div>
-              }
-            </>}
+            )}
           </div>
         </div>
       </div>
