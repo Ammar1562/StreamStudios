@@ -3,52 +3,101 @@ import AdminPanel from './components/AdminPanel';
 import ViewerPage from './components/ViewerPage';
 
 const App: React.FC = () => {
-  const [route, setRoute] = useState<string>(() =>
-    typeof window !== 'undefined' ? window.location.hash || '#/' : '#/'
-  );
+  const [route, setRoute] = useState<string>(() => {
+    // SSR guard: ensure we only read window on the client
+    return typeof window !== 'undefined' ? window.location.hash || '#/' : '#/';
+  });
 
-  const onHashChange = useCallback(() => setRoute(window.location.hash || '#/'), []);
+  const handleHashChange = useCallback(() => {
+    setRoute(window.location.hash || '#/');
+  }, []);
+
   useEffect(() => {
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, [onHashChange]);
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [handleHashChange]);
 
-  if (route.startsWith('#/viewer/')) {
-    const streamId = route.replace('#/viewer/', '');
-    return <ViewerPage streamId={streamId} />;
-  }
-  if (route === '#/admin') return <AdminPanel />;
+  const renderView = () => {
+    if (route.startsWith('#/viewer/')) {
+      const streamId = route.split('#/viewer/')[1];
+      return <ViewerPage streamId={streamId} />;
+    }
+    if (route === '#/admin') {
+      return <AdminPanel />;
+    }
 
-  // Home page
-  return (
-    <div className="min-h-screen bg-[#0f0f0f] flex items-center justify-center p-4" style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
-      <div className="max-w-md w-full slide-up">
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-20 h-20 bg-red-600 rounded-3xl mb-6 shadow-2xl">
-            <svg className="w-10 h-10 text-white" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 8l-6 4V7l6 4z"/>
-            </svg>
-          </div>
-          <h1 className="text-4xl font-bold text-white tracking-tight">StreamStudio</h1>
-          <p className="text-white/40 mt-2 text-sm">Professional live broadcasting, peer-to-peer</p>
-        </div>
-
-        <button onClick={() => { window.location.hash = '#/admin'; }}
-          className="w-full py-4 bg-red-600 hover:bg-red-700 text-white font-bold rounded-2xl transition-all text-base tracking-wide">
-          Open Broadcast Studio
-        </button>
-        <p className="text-xs text-white/25 text-center mt-3">No account needed · End-to-end encrypted · Any device</p>
-
-        <div className="grid grid-cols-3 gap-4 mt-10 pt-8 border-t border-white/10">
-          {[['🔗','Private Links'],['🔒','P2P Encrypted'],['📱','Any Device']].map(([icon, label]) => (
-            <div key={label} className="text-center">
-              <div className="text-2xl mb-1.5">{icon}</div>
-              <div className="text-xs font-medium text-white/35">{label}</div>
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+        <div className="max-w-md w-full">
+          {/* Header */}
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-gray-900 rounded-full mb-4">
+              <svg className="w-8 h-8 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
             </div>
-          ))}
+            <h1 className="text-3xl font-bold text-gray-900">StreamStudios</h1>
+            <p className="text-gray-500 mt-2">Simple, secure live broadcasting</p>
+          </div>
+
+          {/* CTA */}
+          <div className="space-y-3">
+            <button
+              onClick={() => {
+                window.location.hash = '#/admin';
+              }}
+              className="w-full py-3 bg-gray-900 text-white font-medium rounded-full hover:bg-gray-800 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-700"
+              type="button"
+            >
+              Open Broadcast Studio
+            </button>
+            <p className="text-xs text-gray-400 text-center">No account needed • Private streaming links</p>
+          </div>
+
+          {/* Features */}
+          <div className="grid grid-cols-3 gap-4 mt-8 pt-8 border-t border-gray-100">
+            {[
+              { icon: '🔗', label: 'Private Links' },
+              { icon: '🔒', label: 'Encrypted' },
+              { icon: '📱', label: 'Cross-device' },
+            ].map((f) => (
+              <div key={f.label} className="text-center">
+                <div className="text-2xl mb-1">{f.icon}</div>
+                <div className="text-xs font-medium text-gray-700">{f.label}</div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
-    </div>
+    );
+  };
+
+  return (
+    <>
+      <style>{`
+        /* Custom scrollbar from index.html */
+        ::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+          background: #4d4d4dff;
+          border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+          background: #161616ff;
+        }
+        /* Firefox */
+        * {
+          scrollbar-width: thin;
+          scrollbar-color: #4d4d4dff transparent;
+        }
+      `}</style>
+      {renderView()}
+    </>
   );
 };
 
